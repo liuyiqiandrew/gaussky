@@ -1,0 +1,17 @@
+name: gaussky-dev
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.13
+  - numpy
+  - healpy
+  - matplotlib
+  - pytest
+  - black
+  - ruff
+  - mypy
+  - pip
+  - pip:
+      - -e .
