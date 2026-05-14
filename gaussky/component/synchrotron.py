@@ -3,123 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import cast
 
-import healpy as hp  # type: ignore[import-not-found]
-import numpy as np
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import ArrayLike
 
-from gaussky.conventions import (
-    HEALPIX_ORDERINGS,
-    SIGNAL_FIELDS,
-    HealpixOrdering,
-    SignalField,
-    U_K_CMB,
-    U_K_CMB_SQUARED,
-)
+from gaussky.conventions import HealpixOrdering, SignalField
 from gaussky.map import BeamFwhm, MultiFreqCompMap
 from gaussky.ps import PowerLawCl
 from gaussky.sed import PowerLawSED
 
 from .base import GaussianComponent
-
-
-_FIELD_TO_HEALPY_INDEX: dict[SignalField, int] = {"T": 0, "Q": 1, "U": 2}
-
-
-def _normalize_ordering(ordering: HealpixOrdering) -> HealpixOrdering:
-    """Validate and canonicalize a HEALPix ordering label."""
-    if not isinstance(ordering, str):
-        raise TypeError("ordering must be a string")
-    normalized = ordering.upper()
-    if normalized not in HEALPIX_ORDERINGS:
-        valid = ", ".join(HEALPIX_ORDERINGS)
-        raise ValueError(
-            f"Unknown HEALPix ordering {ordering!r}; expected one of {valid}"
-        )
-    return cast(HealpixOrdering, normalized)
-
-
-def _validate_nside(nside: int) -> None:
-    """Validate the HEALPix ``nside`` convention before sampling."""
-    if not isinstance(nside, int):
-        raise TypeError("nside must be an integer")
-    if nside <= 0:
-        raise ValueError("nside must be strictly positive")
-    if nside & (nside - 1):
-        raise ValueError("nside must be a power of two")
-
-
-def _normalize_freqs(freqs_ghz: ArrayLike) -> NDArray[np.float64]:
-    """Return a one-dimensional positive frequency array in GHz."""
-    freqs = np.atleast_1d(np.asarray(freqs_ghz, dtype=np.float64))
-    if freqs.ndim != 1:
-        raise ValueError("freqs_ghz must be one-dimensional")
-    if freqs.size == 0:
-        raise ValueError("freqs_ghz must contain at least one frequency")
-    if np.any(~np.isfinite(freqs)) or np.any(freqs <= 0.0):
-        raise ValueError("freqs_ghz must contain finite positive values")
-    return freqs
-
-
-def _normalize_fields(fields: tuple[SignalField, ...]) -> tuple[SignalField, ...]:
-    """Validate fields and preserve the caller's requested order."""
-    normalized = tuple(fields)
-    if not normalized:
-        raise ValueError("fields must contain at least one field")
-    for signal_field in normalized:
-        if signal_field not in SIGNAL_FIELDS:
-            valid = ", ".join(SIGNAL_FIELDS)
-            raise ValueError(
-                f"Unknown signal field {signal_field!r}; expected one of {valid}"
-            )
-    return normalized
-
-
-def _signal_field_indices(fields: tuple[SignalField, ...]) -> list[int]:
-    """Return Healpy T/Q/U indices for requested signal fields."""
-    return [_FIELD_TO_HEALPY_INDEX[signal_field] for signal_field in fields]
-
-
-def _normalize_beam(beam_fwhm_rad: BeamFwhm, nfreq: int) -> BeamFwhm:
-    """Validate a scalar or per-frequency beam FWHM in radians."""
-    if beam_fwhm_rad is None:
-        return None
-
-    beam = np.asarray(beam_fwhm_rad, dtype=np.float64)
-    if beam.ndim == 0:
-        value = float(beam)
-        if not np.isfinite(value) or value < 0.0:
-            raise ValueError("beam_fwhm_rad must be finite and non-negative")
-        return value
-
-    if beam.ndim != 1:
-        raise ValueError("beam_fwhm_rad must be scalar or one-dimensional")
-    if beam.shape != (nfreq,):
-        raise ValueError("beam_fwhm_rad must be scalar or have shape (nfreq,)")
-    if np.any(~np.isfinite(beam)) or np.any(beam < 0.0):
-        raise ValueError("beam_fwhm_rad must contain finite non-negative values")
-    return beam
-
-
-def _signal_unit(ps: PowerLawCl) -> str:
-    """Return the map unit implied by the power-spectrum unit."""
-    if ps.unit == U_K_CMB_SQUARED:
-        return U_K_CMB
-    raise ValueError(f"Unsupported power-spectrum unit for synchrotron: {ps.unit!r}")
-
-
-def _smooth_tqu(pivot_tqu: NDArray[np.float64], beam: float) -> NDArray[np.float64]:
-    """Smooth a T/Q/U map with Healpy's polarization-aware convention."""
-    return np.asarray(hp.smoothing(pivot_tqu, fwhm=beam, pol=True), dtype=np.float64)
-
-
-def _reorder_ring_to_nested(maps: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Reorder the trailing pixel axis from RING to NESTED."""
-    original_shape = maps.shape
-    flattened = maps.reshape(-1, original_shape[-1])
-    reordered = hp.reorder(flattened, r2n=True)
-    return np.asarray(reordered, dtype=np.float64).reshape(original_shape)
+from .component_utils import sample_gaussian_component_map, validate_component_name
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -150,10 +43,7 @@ class SimplePowerLawSynchrotron(GaussianComponent):
 
     def __post_init__(self) -> None:
         """Validate component parameters and cache the derived SED."""
-        if not isinstance(self.name, str):
-            raise TypeError("name must be a string")
-        if self.name == "":
-            raise ValueError("name must not be empty")
+        validate_component_name(self.name)
         object.__setattr__(
             self,
             "_sed",
@@ -198,62 +88,15 @@ class SimplePowerLawSynchrotron(GaussianComponent):
         MultiFreqCompMap
             Component map with shape ``(nfreq, nfield, npix)``.
         """
-        _validate_nside(nside)
-        normalized_ordering = _normalize_ordering(ordering)
-        freqs = _normalize_freqs(freqs_ghz)
-        normalized_fields = _normalize_fields(fields)
-        beam = _normalize_beam(beam_fwhm_rad, freqs.size)
-        unit = _signal_unit(self.ps)
-
-        lmax = 3 * nside - 1
-        self.ps.validate_positive_semidefinite(
-            np.arange(lmax + 1, dtype=np.float64),
-        )
-
-        npix = hp.nside2npix(nside)
-        pivot_cls = self.ps.to_healpy_cls(lmax)
-        pivot_tqu = np.asarray(
-            hp.synfast(pivot_cls, nside, alm=False, pol=True, new=True),
-            dtype=np.float64,
-        )
-        if pivot_tqu.shape != (len(SIGNAL_FIELDS), npix):
-            raise ValueError(
-                "healpy.synfast must return a T/Q/U map with shape (3, npix)"
-            )
-
-        field_indices = _signal_field_indices(normalized_fields)
-        nfield = len(normalized_fields)
-        maps = np.empty((freqs.size, nfield, npix), dtype=np.float64)
-
-        if beam is None:
-            selected = pivot_tqu[field_indices]
-            maps[...] = selected[None, :, :]
-        elif np.asarray(beam).ndim == 0:
-            smoothed_tqu = _smooth_tqu(pivot_tqu, float(beam))
-            selected = smoothed_tqu[field_indices]
-            maps[...] = selected[None, :, :]
-        else:
-            beam_array = np.asarray(beam, dtype=np.float64)
-            for freq_index, channel_beam in enumerate(beam_array):
-                smoothed_tqu = _smooth_tqu(pivot_tqu, float(channel_beam))
-                maps[freq_index] = smoothed_tqu[field_indices]
-
-        freq_scaling = self.sed.scale(freqs)
-        maps *= freq_scaling[:, None, None]
-
-        if normalized_ordering == "NESTED":
-            maps = _reorder_ring_to_nested(maps)
-
-        return MultiFreqCompMap(
-            maps=maps,
-            unit=unit,
-            nside=nside,
-            ordering=normalized_ordering,
-            coord=coord,
-            freqs_ghz=freqs,
-            fields=normalized_fields,
-            beam_fwhm_rad=beam,
+        return sample_gaussian_component_map(
+            ps=self.ps,
+            sed=self.sed,
             component_name=self.name,
-            auxiliary_maps={},
             metadata={"beta_s": self.beta_s, "nu0_ghz": self.nu0_ghz},
+            nside=nside,
+            freqs_ghz=freqs_ghz,
+            fields=fields,
+            beam_fwhm_rad=beam_fwhm_rad,
+            ordering=ordering,
+            coord=coord,
         )

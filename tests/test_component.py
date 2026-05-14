@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 import gaussky.component as component
-from gaussky.component import synchrotron
+from gaussky.component import component_utils, dust, synchrotron
+from gaussky.component.dust import SimpleModifiedBlackbodyDust
 from gaussky.component.synchrotron import SimplePowerLawSynchrotron
 from gaussky.ps import PowerLawCl
 
@@ -43,7 +44,7 @@ def _power_spectrum(unit="uK_CMB^2"):
     return PowerLawCl(amp_tt=1.0, amp_ee=1.0, amp_bb=1.0, unit=unit)
 
 
-def _component(ps=None, *, beta_s=-3.0, nu0_ghz=30.0):
+def _synchrotron_component(ps=None, *, beta_s=-3.0, nu0_ghz=30.0):
     return SimplePowerLawSynchrotron(
         ps=_power_spectrum() if ps is None else ps,
         beta_s=beta_s,
@@ -51,21 +52,36 @@ def _component(ps=None, *, beta_s=-3.0, nu0_ghz=30.0):
     )
 
 
+def _dust_component(ps=None, *, beta_d=1.6, temp_d=19.6, nu0_ghz=353.0):
+    return SimpleModifiedBlackbodyDust(
+        ps=_power_spectrum() if ps is None else ps,
+        beta_d=beta_d,
+        temp_d=temp_d,
+        nu0_ghz=nu0_ghz,
+    )
+
+
 def _patch_healpy(monkeypatch):
     fake = FakeHealpy()
-    monkeypatch.setattr(synchrotron, "hp", fake)
+    monkeypatch.setattr(component_utils, "hp", fake)
     return fake
 
 
 def test_component_package_exports_flat_public_api():
     assert component.GaussianComponent is synchrotron.GaussianComponent
     assert component.SimplePowerLawSynchrotron is SimplePowerLawSynchrotron
-    assert component.__all__ == ["GaussianComponent", "SimplePowerLawSynchrotron"]
+    assert component.SimpleModifiedBlackbodyDust is SimpleModifiedBlackbodyDust
+    assert component.SimpleModifiedBlackbodyDust is dust.SimpleModifiedBlackbodyDust
+    assert component.__all__ == [
+        "GaussianComponent",
+        "SimpleModifiedBlackbodyDust",
+        "SimplePowerLawSynchrotron",
+    ]
 
 
 def test_simple_power_law_synchrotron_samples_scaled_component_map(monkeypatch):
     fake = _patch_healpy(monkeypatch)
-    sampler = _component()
+    sampler = _synchrotron_component()
     freqs = np.array([30.0, 90.0])
 
     sampled = sampler.sample_map(
@@ -101,7 +117,7 @@ def test_simple_power_law_synchrotron_samples_scaled_component_map(monkeypatch):
 
 def test_simple_power_law_synchrotron_preserves_requested_field_order(monkeypatch):
     _patch_healpy(monkeypatch)
-    sampler = _component()
+    sampler = _synchrotron_component()
 
     sampled = sampler.sample_map(
         nside=1,
@@ -116,7 +132,7 @@ def test_simple_power_law_synchrotron_preserves_requested_field_order(monkeypatc
 
 def test_simple_power_law_synchrotron_supports_per_frequency_beams(monkeypatch):
     fake = _patch_healpy(monkeypatch)
-    sampler = _component()
+    sampler = _synchrotron_component()
     beams = np.array([0.01, 0.02])
     freqs = np.array([30.0, 40.0])
 
@@ -139,7 +155,7 @@ def test_simple_power_law_synchrotron_supports_per_frequency_beams(monkeypatch):
 
 def test_simple_power_law_synchrotron_reorders_nested_output(monkeypatch):
     fake = _patch_healpy(monkeypatch)
-    sampler = _component()
+    sampler = _synchrotron_component()
 
     sampled = sampler.sample_map(
         nside=1,
@@ -154,14 +170,52 @@ def test_simple_power_law_synchrotron_reorders_nested_output(monkeypatch):
 
 
 def test_simple_power_law_synchrotron_rejects_unsupported_ps_unit():
-    sampler = _component(ps=_power_spectrum(unit="K_RJ^2"))
+    sampler = _synchrotron_component(ps=_power_spectrum(unit="K_RJ^2"))
 
     with pytest.raises(ValueError, match="Unsupported power-spectrum unit"):
         sampler.sample_map(nside=1, freqs_ghz=[30.0], fields=("T",))
 
 
 def test_simple_power_law_synchrotron_rejects_non_psd_power_spectrum():
-    sampler = _component(ps=PowerLawCl(amp_tt=1.0, amp_ee=1.0, amp_te=2.0))
+    sampler = _synchrotron_component(ps=PowerLawCl(amp_tt=1.0, amp_ee=1.0, amp_te=2.0))
 
     with pytest.raises(ValueError, match="positive semidefinite"):
         sampler.sample_map(nside=1, freqs_ghz=[30.0], fields=("T",))
+
+
+def test_simple_modified_blackbody_dust_samples_scaled_component_map(monkeypatch):
+    fake = _patch_healpy(monkeypatch)
+    sampler = _dust_component()
+    freqs = np.array([353.0, 150.0])
+
+    sampled = sampler.sample_map(
+        nside=1,
+        freqs_ghz=freqs,
+        fields=("T", "Q"),
+        beam_fwhm_rad=0.05,
+        coord="G",
+    )
+
+    pixels = np.arange(12, dtype=np.float64)
+    base_tq = np.vstack([60.0 + pixels, 70.0 + pixels])
+    expected = sampler.sed.scale(freqs)[:, None, None] * base_tq[None, :, :]
+    np.testing.assert_allclose(sampled.maps, expected)
+    assert sampled.component_name == "dust"
+    assert sampled.unit == "uK_CMB"
+    assert sampled.coord == "G"
+    assert sampled.metadata == {
+        "beta_d": 1.6,
+        "temp_d": 19.6,
+        "nu0_ghz": 353.0,
+    }
+    assert fake.smoothing_calls == [{"fwhm": 0.05, "pol": True}]
+
+
+def test_simple_modified_blackbody_dust_rejects_invalid_temperature():
+    with pytest.raises(ValueError, match="temperature_k"):
+        SimpleModifiedBlackbodyDust(
+            ps=_power_spectrum(),
+            beta_d=1.6,
+            temp_d=0.0,
+            nu0_ghz=353.0,
+        )
