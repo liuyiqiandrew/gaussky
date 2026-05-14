@@ -10,12 +10,8 @@ from typing import Self
 import numpy as np
 from numpy.typing import NDArray
 
-from .base import (
-    BaseSignalMap,
-    HealpixMapContainer,
-    SignalField,
-    _normalize_metadata,
-)
+from .base import BaseSignalMap, HealpixMapContainer, SignalField
+from .map_utils import normalize_metadata
 
 
 def _normalize_auxiliary_maps(
@@ -84,7 +80,7 @@ class MultiFreqCompMap(BaseSignalMap):
             "auxiliary_maps",
             _normalize_auxiliary_maps(self.auxiliary_maps, self),
         )
-        object.__setattr__(self, "metadata", _normalize_metadata(self.metadata))
+        object.__setattr__(self, "metadata", normalize_metadata(self.metadata))
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
