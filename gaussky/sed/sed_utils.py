@@ -12,7 +12,7 @@ from .base import _positive_frequency_array, _validate_positive_scalar
 # SI constants used by the Planck and thermodynamic-temperature conversions.
 H_PLANCK: Final[float] = 6.62607015e-34  # Planck constant [J s]
 K_BOLTZMANN: Final[float] = 1.380649e-23  # Boltzmann constant [J/K]
-T_CMB: Final[float] = 2.7255  # CMB monopole temperature [K]
+T_CMB: Final[float] = 2.725  # CMB monopole temperature [K]
 
 
 def planck_rj_spectrum(

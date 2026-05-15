@@ -1,19 +1,19 @@
 """Angular power-spectrum interfaces and simple analytic models."""
 
+from gaussky.conventions import HEALPY_POLARIZED_ORDER, SpectrumPair
+
 from .base import (
     AngularPowerSpectrum,
-    ClSpectra,
-    HEALPY_POLARIZED_ORDER,
-    SpectrumPair,
-    cl_spectra_from_model,
+    validate_healpy_cls,
 )
+from .cmb import CMBCl
 from .powerlaw import PowerLawCl
 
 __all__ = [
     "AngularPowerSpectrum",
-    "ClSpectra",
+    "CMBCl",
     "HEALPY_POLARIZED_ORDER",
     "PowerLawCl",
     "SpectrumPair",
-    "cl_spectra_from_model",
+    "validate_healpy_cls",
 ]

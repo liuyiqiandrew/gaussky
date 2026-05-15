@@ -66,8 +66,8 @@ class SimpleModifiedBlackbodyDust(GaussianComponent):
         self,
         *,
         nside: int,
-        freqs_ghz: ArrayLike,
         fields: tuple[SignalField, ...],
+        freqs_ghz: ArrayLike | None = None,
         beam_fwhm_rad: BeamFwhm = None,
         ordering: HealpixOrdering = "RING",
         coord: str | None = None,
@@ -78,8 +78,9 @@ class SimpleModifiedBlackbodyDust(GaussianComponent):
         ----------
         nside : int
             HEALPix resolution parameter.
-        freqs_ghz : array_like
-            Frequency channels in GHz.
+        freqs_ghz : array_like or None, default=None
+            Frequency channels in GHz. If ``None``, only ``nu0_ghz`` is sampled
+            and the SED scaling is one.
         fields : tuple of {"T", "Q", "U"}
             Signal fields to retain, in output order.
         beam_fwhm_rad : float, ndarray, or None, default=None

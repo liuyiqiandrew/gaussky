@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 import gaussky.component as component
-from gaussky.component import component_utils, dust, synchrotron
+from gaussky.component import cmb, component_utils, dust, synchrotron
+from gaussky.component.cmb import GaussianCMB
 from gaussky.component.dust import SimpleModifiedBlackbodyDust
 from gaussky.component.synchrotron import SimplePowerLawSynchrotron
 from gaussky.ps import PowerLawCl
@@ -40,6 +41,18 @@ class FakeHealpy:
         return np.asarray(maps, dtype=np.float64)[..., ::-1]
 
 
+class FakeCMBPowerSpectrum:
+    unit = "uK_CMB^2"
+    a_lens = 0.75
+    r_tensor = 0.05
+    template_dir = "/fake/cmb_spec"
+
+    def to_healpy_cls(self, lmax):
+        auto = np.ones(lmax + 1, dtype=np.float64)
+        cross = np.zeros(lmax + 1, dtype=np.float64)
+        return [auto, auto, auto, cross, cross, cross]
+
+
 def _power_spectrum(unit="uK_CMB^2"):
     return PowerLawCl(amp_tt=1.0, amp_ee=1.0, amp_bb=1.0, unit=unit)
 
@@ -61,6 +74,10 @@ def _dust_component(ps=None, *, beta_d=1.6, temp_d=19.6, nu0_ghz=353.0):
     )
 
 
+def _cmb_component(ps=None):
+    return GaussianCMB(ps=FakeCMBPowerSpectrum() if ps is None else ps)
+
+
 def _patch_healpy(monkeypatch):
     fake = FakeHealpy()
     monkeypatch.setattr(component_utils, "hp", fake)
@@ -68,11 +85,14 @@ def _patch_healpy(monkeypatch):
 
 
 def test_component_package_exports_flat_public_api():
+    assert component.GaussianCMB is GaussianCMB
+    assert component.GaussianCMB is cmb.GaussianCMB
     assert component.GaussianComponent is synchrotron.GaussianComponent
     assert component.SimplePowerLawSynchrotron is SimplePowerLawSynchrotron
     assert component.SimpleModifiedBlackbodyDust is SimpleModifiedBlackbodyDust
     assert component.SimpleModifiedBlackbodyDust is dust.SimpleModifiedBlackbodyDust
     assert component.__all__ == [
+        "GaussianCMB",
         "GaussianComponent",
         "SimpleModifiedBlackbodyDust",
         "SimplePowerLawSynchrotron",
@@ -130,6 +150,17 @@ def test_simple_power_law_synchrotron_preserves_requested_field_order(monkeypatc
     assert sampled.fields == ("U", "Q")
 
 
+def test_simple_power_law_synchrotron_defaults_to_pivot_frequency(monkeypatch):
+    _patch_healpy(monkeypatch)
+    sampler = _synchrotron_component()
+
+    sampled = sampler.sample_map(nside=1, fields=("T",))
+
+    pixels = np.arange(12, dtype=np.float64)
+    np.testing.assert_allclose(sampled.freqs_ghz, [sampler.nu0_ghz])
+    np.testing.assert_allclose(sampled.maps[0, 0], 10.0 + pixels)
+
+
 def test_simple_power_law_synchrotron_supports_per_frequency_beams(monkeypatch):
     fake = _patch_healpy(monkeypatch)
     sampler = _synchrotron_component()
@@ -183,6 +214,92 @@ def test_simple_power_law_synchrotron_rejects_non_psd_power_spectrum():
         sampler.sample_map(nside=1, freqs_ghz=[30.0], fields=("T",))
 
 
+def test_gaussian_cmb_samples_frequency_independent_map(monkeypatch):
+    fake = _patch_healpy(monkeypatch)
+    sampler = _cmb_component()
+
+    sampled = sampler.sample_map(
+        nside=1,
+        freqs_ghz=[90.0, 150.0],
+        fields=("T", "Q"),
+        coord="G",
+    )
+
+    pixels = np.arange(12, dtype=np.float64)
+    expected = np.vstack([10.0 + pixels, 20.0 + pixels])
+    np.testing.assert_allclose(sampled.maps[0], expected)
+    np.testing.assert_allclose(sampled.maps[1], expected)
+    assert sampled.component_name == "cmb"
+    assert sampled.unit == "uK_CMB"
+    assert sampled.coord == "G"
+    assert sampled.metadata == {
+        "a_lens": 0.75,
+        "r_tensor": 0.05,
+        "template_dir": "/fake/cmb_spec",
+    }
+    assert len(fake.synfast_calls) == 1
+    assert fake.smoothing_calls == []
+
+
+def test_gaussian_cmb_smooths_scalar_beam_once_and_repeats(monkeypatch):
+    fake = _patch_healpy(monkeypatch)
+    sampler = _cmb_component()
+
+    sampled = sampler.sample_map(
+        nside=1,
+        freqs_ghz=[90.0, 150.0],
+        fields=("T",),
+        beam_fwhm_rad=0.02,
+    )
+
+    pixels = np.arange(12, dtype=np.float64)
+    expected = 30.0 + pixels
+    np.testing.assert_allclose(sampled.maps[:, 0, :], np.vstack([expected, expected]))
+    assert fake.smoothing_calls == [{"fwhm": 0.02, "pol": True}]
+
+
+def test_gaussian_cmb_supports_per_frequency_beams(monkeypatch):
+    fake = _patch_healpy(monkeypatch)
+    sampler = _cmb_component()
+    beams = np.array([0.01, 0.02])
+
+    sampled = sampler.sample_map(
+        nside=1,
+        freqs_ghz=[90.0, 150.0],
+        fields=("U", "Q"),
+        beam_fwhm_rad=beams,
+    )
+
+    pixels = np.arange(12, dtype=np.float64)
+    expected = np.array(
+        [
+            [40.0 + pixels, 30.0 + pixels],
+            [50.0 + pixels, 40.0 + pixels],
+        ]
+    )
+    np.testing.assert_allclose(sampled.maps, expected)
+    assert fake.smoothing_calls == [
+        {"fwhm": 0.01, "pol": True},
+        {"fwhm": 0.02, "pol": True},
+    ]
+
+
+def test_gaussian_cmb_reorders_nested_output(monkeypatch):
+    fake = _patch_healpy(monkeypatch)
+    sampler = _cmb_component()
+
+    sampled = sampler.sample_map(
+        nside=1,
+        freqs_ghz=[90.0],
+        fields=("T",),
+        ordering="NESTED",
+    )
+
+    np.testing.assert_allclose(sampled.maps[0, 0], 10.0 + np.arange(11, -1, -1))
+    assert sampled.ordering == "NESTED"
+    assert fake.reorder_calls == [{"r2n": True}]
+
+
 def test_simple_modified_blackbody_dust_samples_scaled_component_map(monkeypatch):
     fake = _patch_healpy(monkeypatch)
     sampler = _dust_component()
@@ -209,6 +326,17 @@ def test_simple_modified_blackbody_dust_samples_scaled_component_map(monkeypatch
         "nu0_ghz": 353.0,
     }
     assert fake.smoothing_calls == [{"fwhm": 0.05, "pol": True}]
+
+
+def test_simple_modified_blackbody_dust_defaults_to_pivot_frequency(monkeypatch):
+    _patch_healpy(monkeypatch)
+    sampler = _dust_component()
+
+    sampled = sampler.sample_map(nside=1, fields=("Q",))
+
+    pixels = np.arange(12, dtype=np.float64)
+    np.testing.assert_allclose(sampled.freqs_ghz, [sampler.nu0_ghz])
+    np.testing.assert_allclose(sampled.maps[0, 0], 20.0 + pixels)
 
 
 def test_simple_modified_blackbody_dust_rejects_invalid_temperature():

@@ -8,15 +8,13 @@ from typing import cast
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from gaussky.conventions import U_K_CMB_SQUARED
-
-from .base import (
+from gaussky.conventions import (
     HEALPY_POLARIZED_ORDER,
-    AngularPowerSpectrum,
-    ClSpectra,
     SpectrumPair,
-    cl_spectra_from_model,
+    U_K_CMB_SQUARED,
 )
+
+from .base import AngularPowerSpectrum
 
 
 _AMPLITUDE_FIELDS: dict[SpectrumPair, str] = {
@@ -52,7 +50,10 @@ class PowerLawCl(AngularPowerSpectrum):
     """Power-law angular ``C_ell`` model.
 
     The amplitudes are ``C_ell`` values at ``ell0``. This class does not
-    interpret amplitudes as ``D_ell = ell (ell + 1) C_ell / 2 pi``.
+    interpret amplitudes as ``D_ell = ell (ell + 1) C_ell / 2 pi`` unless
+    ``is_cell`` is set to ``False``. The :meth:`cl` method is retained as a
+    convenience for analytic evaluations, while :meth:`to_healpy_cls` is the
+    simulation-facing protocol used by map samplers.
 
     Parameters
     ----------
@@ -152,30 +153,10 @@ class PowerLawCl(AngularPowerSpectrum):
                 # Some literature quotes amplitudes in D_ell; downstream code
                 # consumes C_ell, so apply the standard conversion factor here.
                 dl2cl = np.zeros_like(ell_array)
-                dl2cl[mask] = 2 * np.pi / ell_array / (ell_array + 1)
+                dl2cl[mask] = 2 * np.pi / (ell_array[mask] * (ell_array[mask] + 1.0))
                 values *= dl2cl
 
         return values
-
-    def to_cl_spectra(self, lmax: int) -> ClSpectra:
-        """Build named ``C_ell`` spectra on integer multipoles.
-
-        Parameters
-        ----------
-        lmax : int
-            Maximum multipole. Grid arrays have length ``lmax + 1``.
-
-        Returns
-        -------
-        ClSpectra
-            Spectra named by pair and ordered as ``TT, EE, BB, TE, EB, TB``.
-
-        Raises
-        ------
-        ValueError
-            If ``lmax`` is negative.
-        """
-        return cl_spectra_from_model(self, lmax)
 
     def to_healpy_cls(self, lmax: int) -> list[NDArray[np.float64]]:
         """Build spectra in Healpy's polarized ordering.
@@ -189,8 +170,17 @@ class PowerLawCl(AngularPowerSpectrum):
         -------
         list of ndarray
             Spectra ordered as ``TT, EE, BB, TE, EB, TB``.
+
+        Raises
+        ------
+        ValueError
+            If ``lmax`` is negative.
         """
-        return self.to_cl_spectra(lmax).to_healpy_cls()
+        if lmax < 0:
+            raise ValueError("lmax must be non-negative")
+
+        ells = np.arange(lmax + 1, dtype=np.float64)
+        return [self.cl(pair, ells) for pair in HEALPY_POLARIZED_ORDER]
 
     def alm_covariance(self, ell: ArrayLike) -> NDArray[np.float64]:
         """Return T/E/B covariance matrices at each multipole.

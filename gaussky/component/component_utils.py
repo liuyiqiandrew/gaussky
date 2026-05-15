@@ -18,9 +18,8 @@ from gaussky.conventions import (
     U_K_CMB_SQUARED,
 )
 from gaussky.map import BeamFwhm, MultiFreqCompMap
-from gaussky.ps import PowerLawCl
+from gaussky.ps import AngularPowerSpectrum, validate_healpy_cls
 from gaussky.sed import SpectralEnergyDistribution
-
 
 _FIELD_TO_HEALPY_INDEX: dict[SignalField, int] = {"T": 0, "Q": 1, "U": 2}
 
@@ -56,8 +55,17 @@ def _validate_nside(nside: int) -> None:
         raise ValueError("nside must be a power of two")
 
 
-def _normalize_freqs(freqs_ghz: ArrayLike) -> NDArray[np.float64]:
+def _normalize_freqs(
+    freqs_ghz: ArrayLike | None,
+    *,
+    default_ghz: float | None = None,
+) -> NDArray[np.float64]:
     """Return a one-dimensional positive frequency array in GHz."""
+    if freqs_ghz is None:
+        if default_ghz is None:
+            raise ValueError("freqs_ghz must be provided")
+        freqs_ghz = [default_ghz]
+
     freqs = np.atleast_1d(np.asarray(freqs_ghz, dtype=np.float64))
     if freqs.ndim != 1:
         raise ValueError("freqs_ghz must be one-dimensional")
@@ -108,7 +116,7 @@ def _normalize_beam(beam_fwhm_rad: BeamFwhm, nfreq: int) -> BeamFwhm:
     return beam
 
 
-def _signal_unit(ps: PowerLawCl) -> str:
+def _signal_unit(ps: AngularPowerSpectrum) -> str:
     """Return the map unit implied by the power-spectrum unit."""
     if ps.unit == U_K_CMB_SQUARED:
         return U_K_CMB
@@ -132,13 +140,13 @@ def _reorder_ring_to_nested(maps: NDArray[np.float64]) -> NDArray[np.float64]:
 
 def sample_gaussian_component_map(
     *,
-    ps: PowerLawCl,
+    ps: AngularPowerSpectrum,
     sed: SpectralEnergyDistribution,
     component_name: str,
     metadata: Mapping[str, object],
     nside: int,
-    freqs_ghz: ArrayLike,
     fields: tuple[SignalField, ...],
+    freqs_ghz: ArrayLike | None = None,
     beam_fwhm_rad: BeamFwhm = None,
     ordering: HealpixOrdering = "RING",
     coord: str | None = None,
@@ -147,8 +155,10 @@ def sample_gaussian_component_map(
 
     Parameters
     ----------
-    ps : PowerLawCl
-        Polarized angular power spectrum at the SED reference frequency.
+    ps : AngularPowerSpectrum
+        Polarized angular power spectrum at the SED reference frequency. The
+        model must return Healpy-ordered spectra compatible with polarized
+        :func:`synfast`.
     sed : SpectralEnergyDistribution
         Frequency scaling normalized at the same reference frequency as ``ps``.
     component_name : str
@@ -157,8 +167,110 @@ def sample_gaussian_component_map(
         Component model parameters stored in the returned map.
     nside : int
         HEALPix resolution parameter.
+    freqs_ghz : array_like or None, default=None
+        Frequency channels in GHz. If ``None``, the SED pivot frequency
+        ``sed.nu0_ghz`` is sampled, so the returned map has one frequency
+        channel with unit SED scaling.
+    fields : tuple of {"T", "Q", "U"}
+        Signal fields to retain, in output order.
+    beam_fwhm_rad : float, ndarray, or None, default=None
+        Beam FWHM in radians. A scalar beam is shared across channels; a
+        one-dimensional array supplies one beam per frequency.
+    ordering : {"RING", "NESTED"}, default="RING"
+        HEALPix ordering for the returned map.
+    coord : str or None, default=None
+        Optional coordinate-frame label for the returned map.
+
+    Returns
+    -------
+    MultiFreqCompMap
+        Component map with shape ``(nfreq, nfield, npix)``.
+    """
+    _validate_nside(nside)
+    normalized_ordering = _normalize_ordering(ordering)
+    freqs = _normalize_freqs(freqs_ghz, default_ghz=sed.nu0_ghz)
+    normalized_fields = _normalize_fields(fields)
+    beam = _normalize_beam(beam_fwhm_rad, freqs.size)
+    unit = _signal_unit(ps)
+
+    lmax = 3 * nside - 1
+    healpy_cls = validate_healpy_cls(ps.to_healpy_cls(lmax), lmax)
+
+    npix = hp.nside2npix(nside)
+    pivot_tqu = np.asarray(
+        hp.synfast(healpy_cls, nside, alm=False, pol=True, new=True),
+        dtype=np.float64,
+    )
+    if pivot_tqu.shape != (len(SIGNAL_FIELDS), npix):
+        raise ValueError("healpy.synfast must return a T/Q/U map with shape (3, npix)")
+
+    field_indices = _signal_field_indices(normalized_fields)
+    maps = np.empty((freqs.size, len(normalized_fields), npix), dtype=np.float64)
+
+    if beam is None:
+        selected = pivot_tqu[field_indices]
+        maps[...] = selected[None, :, :]
+    elif np.asarray(beam).ndim == 0:
+        smoothed_tqu = _smooth_tqu(pivot_tqu, float(beam))
+        selected = smoothed_tqu[field_indices]
+        maps[...] = selected[None, :, :]
+    else:
+        beam_array = np.asarray(beam, dtype=np.float64)
+        for freq_index, channel_beam in enumerate(beam_array):
+            smoothed_tqu = _smooth_tqu(pivot_tqu, float(channel_beam))
+            maps[freq_index] = smoothed_tqu[field_indices]
+
+    maps *= sed.scale(freqs)[:, None, None]
+
+    if normalized_ordering == "NESTED":
+        maps = _reorder_ring_to_nested(maps)
+
+    return MultiFreqCompMap(
+        maps=maps,
+        unit=unit,
+        nside=nside,
+        ordering=normalized_ordering,
+        coord=coord,
+        freqs_ghz=freqs,
+        fields=normalized_fields,
+        beam_fwhm_rad=beam,
+        component_name=component_name,
+        auxiliary_maps={},
+        metadata=metadata,
+    )
+
+
+def sample_frequency_independent_gaussian_component_map(
+    *,
+    ps: AngularPowerSpectrum,
+    component_name: str,
+    metadata: Mapping[str, object],
+    nside: int,
+    freqs_ghz: ArrayLike | None,
+    fields: tuple[SignalField, ...],
+    beam_fwhm_rad: BeamFwhm = None,
+    ordering: HealpixOrdering = "RING",
+    coord: str | None = None,
+) -> MultiFreqCompMap:
+    """Sample a Gaussian component with no frequency-dependent SED.
+
+    The same underlying T/Q/U realization is used for every requested
+    frequency. Beam smoothing may still differ per frequency channel.
+
+    Parameters
+    ----------
+    ps : AngularPowerSpectrum
+        Polarized angular power spectrum. The model must return Healpy-ordered
+        spectra compatible with polarized :func:`synfast`.
+    component_name : str
+        Component label stored in the returned map.
+    metadata : mapping
+        Component model parameters stored in the returned map.
+    nside : int
+        HEALPix resolution parameter.
     freqs_ghz : array_like
-        Frequency channels in GHz.
+        Frequency channels in GHz. They label repeated CMB maps and do not
+        change the sampled sky signal.
     fields : tuple of {"T", "Q", "U"}
         Signal fields to retain, in output order.
     beam_fwhm_rad : float, ndarray, or None, default=None
@@ -182,11 +294,11 @@ def sample_gaussian_component_map(
     unit = _signal_unit(ps)
 
     lmax = 3 * nside - 1
-    ps.validate_positive_semidefinite(np.arange(lmax + 1, dtype=np.float64))
+    healpy_cls = validate_healpy_cls(ps.to_healpy_cls(lmax), lmax)
 
     npix = hp.nside2npix(nside)
     pivot_tqu = np.asarray(
-        hp.synfast(ps.to_healpy_cls(lmax), nside, alm=False, pol=True, new=True),
+        hp.synfast(healpy_cls, nside, alm=False, pol=True, new=True),
         dtype=np.float64,
     )
     if pivot_tqu.shape != (len(SIGNAL_FIELDS), npix):
@@ -207,8 +319,6 @@ def sample_gaussian_component_map(
         for freq_index, channel_beam in enumerate(beam_array):
             smoothed_tqu = _smooth_tqu(pivot_tqu, float(channel_beam))
             maps[freq_index] = smoothed_tqu[field_indices]
-
-    maps *= sed.scale(freqs)[:, None, None]
 
     if normalized_ordering == "NESTED":
         maps = _reorder_ring_to_nested(maps)

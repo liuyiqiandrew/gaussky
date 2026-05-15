@@ -2,149 +2,113 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Protocol
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from gaussky.conventions import HEALPY_POLARIZED_ORDER, SpectrumPair
+from gaussky.conventions import HEALPY_POLARIZED_ORDER
 
 
 class AngularPowerSpectrum(Protocol):
-    """Angular ``C_ell`` definition for a Gaussian sky component."""
+    """Angular ``C_ell`` model for Gaussian sky simulation.
+
+    Implementations provide spectra on the integer multipole grid requested by
+    simulation code in the polarized ordering consumed by
+    :func:`healpy.synfast`.
+    """
 
     unit: str
 
-    def cl(self, pair: SpectrumPair, ell: ArrayLike) -> NDArray[np.float64]:
-        """Evaluate the angular power spectrum.
+    def to_healpy_cls(self, lmax: int) -> list[NDArray[np.float64]]:
+        """Return spectra up to ``lmax`` in Healpy polarized ordering.
 
         Parameters
         ----------
-        pair : {"TT", "EE", "BB", "TE", "EB", "TB"}
-            Spectrum component to evaluate.
-        ell : array_like
-            Multipole or multipoles.
+        lmax : int
+            Maximum multipole. Returned arrays must have length ``lmax + 1``
+            and cover multipoles ``0`` through ``lmax``.
 
         Returns
         -------
-        ndarray
-            ``C_ell`` values in ``self.unit`` with the broadcast shape of
-            ``ell``.
+        list of ndarray
+            ``C_ell`` arrays ordered as ``TT, EE, BB, TE, EB, TB``.
         """
         ...
 
 
-@dataclass(frozen=True, kw_only=True)
-class ClSpectra:
-    """Named collection of one-dimensional ``C_ell`` arrays.
-
-    Parameters
-    ----------
-    ells : ndarray
-        One-dimensional multipole grid.
-    pairs : tuple of SpectrumPair
-        Spectrum-pair labels for the first axis of ``values``.
-    values : ndarray
-        Spectra with shape ``(npair, nell)``.
-    unit : str
-        Physical unit of all spectra.
-    """
-
-    ells: NDArray[np.float64]
-    pairs: tuple[SpectrumPair, ...]
-    values: NDArray[np.float64]
-    unit: str
-
-    def __post_init__(self) -> None:
-        """Normalize arrays and validate the named spectra."""
-        ells = np.array(self.ells, dtype=np.float64, copy=True)
-        values = np.array(self.values, dtype=np.float64, copy=True)
-        pairs = tuple(self.pairs)
-
-        if ells.ndim != 1:
-            raise ValueError("ells must be one-dimensional")
-        if np.any(ells < 0.0):
-            raise ValueError("ells must be non-negative")
-        if not pairs:
-            raise ValueError("pairs must contain at least one spectrum pair")
-        if len(set(pairs)) != len(pairs):
-            raise ValueError("pairs must be unique")
-        unknown_pairs = set(pairs) - set(HEALPY_POLARIZED_ORDER)
-        if unknown_pairs:
-            names = ", ".join(sorted(unknown_pairs))
-            raise ValueError(f"Unknown spectrum pair(s): {names}")
-        if values.shape != (len(pairs), ells.size):
-            raise ValueError("values must have shape (npair, nell)")
-        if not isinstance(self.unit, str):
-            raise TypeError("unit must be a string")
-        if self.unit == "":
-            raise ValueError("unit must not be empty")
-
-        ells.setflags(write=False)
-        values.setflags(write=False)
-        object.__setattr__(self, "ells", ells)
-        object.__setattr__(self, "pairs", pairs)
-        object.__setattr__(self, "values", values)
-
-    def cls_for(self, pair: SpectrumPair) -> NDArray[np.float64]:
-        """Return the spectrum array for one pair label.
-
-        Parameters
-        ----------
-        pair : SpectrumPair
-            Spectrum pair to locate.
-
-        Returns
-        -------
-        ndarray
-            Read-only one-dimensional ``C_ell`` array.
-        """
-        try:
-            index = self.pairs.index(pair)
-        except ValueError as error:
-            raise ValueError(f"Spectrum pair {pair!r} is not present") from error
-        return self.values[index]
-
-    def to_healpy_cls(
-        self,
-        *,
-        order: tuple[SpectrumPair, ...] = HEALPY_POLARIZED_ORDER,
-    ) -> list[NDArray[np.float64]]:
-        """Return spectra as a list in Healpy-compatible pair ordering."""
-        return [self.cls_for(pair) for pair in order]
-
-
-def cl_spectra_from_model(
-    spectrum: AngularPowerSpectrum,
+def validate_healpy_cls(
+    healpy_cls: Sequence[ArrayLike],
     lmax: int,
     *,
-    pairs: tuple[SpectrumPair, ...] = HEALPY_POLARIZED_ORDER,
-) -> ClSpectra:
-    """Evaluate a power-spectrum model on the integer multipole grid.
+    atol: float = 0.0,
+) -> list[NDArray[np.float64]]:
+    """Validate and normalize polarized Healpy ``C_ell`` arrays.
 
     Parameters
     ----------
-    spectrum : AngularPowerSpectrum
-        Spectrum model to evaluate.
+    healpy_cls : sequence of array_like
+        Six spectra ordered as ``TT, EE, BB, TE, EB, TB``.
     lmax : int
-        Maximum multipole. The returned spectra have length ``lmax + 1``.
-    pairs : tuple of SpectrumPair, default=HEALPY_POLARIZED_ORDER
-        Spectrum pairs to include.
+        Maximum multipole. Each spectrum must have length ``lmax + 1``.
+    atol : float, default=0.0
+        Absolute tolerance for small negative covariance eigenvalues.
 
     Returns
     -------
-    ClSpectra
-        Named spectra with one row per requested pair.
+    list of ndarray
+        Read-only ``float64`` arrays in Healpy polarized ordering.
 
     Raises
     ------
     ValueError
-        If ``lmax`` is negative.
+        If the spectra are not shaped for Healpy, contain non-finite values, or
+        define a non-positive-semidefinite T/E/B covariance.
     """
     if lmax < 0:
         raise ValueError("lmax must be non-negative")
+    if atol < 0.0:
+        raise ValueError("atol must be non-negative")
+    if len(healpy_cls) != len(HEALPY_POLARIZED_ORDER):
+        raise ValueError(
+            "healpy_cls must contain six spectra ordered as TT, EE, BB, TE, EB, TB"
+        )
 
-    ells = np.arange(lmax + 1, dtype=np.float64)
-    values = np.vstack([spectrum.cl(pair, ells) for pair in pairs])
-    return ClSpectra(ells=ells, pairs=pairs, values=values, unit=spectrum.unit)
+    expected_shape = (lmax + 1,)
+    normalized_cls: list[NDArray[np.float64]] = []
+    for pair, values in zip(HEALPY_POLARIZED_ORDER, healpy_cls, strict=True):
+        array = np.array(values, dtype=np.float64, copy=True)
+        if array.ndim != 1:
+            raise ValueError(f"{pair} spectrum must be one-dimensional")
+        if array.shape != expected_shape:
+            raise ValueError(
+                f"{pair} spectrum must have length {lmax + 1}; "
+                f"got shape {array.shape}"
+            )
+        if np.any(~np.isfinite(array)):
+            raise ValueError(f"{pair} spectrum must contain finite values")
+        array.setflags(write=False)
+        normalized_cls.append(array)
+
+    covariance = _alm_covariance_from_healpy_cls(normalized_cls)
+    eigvals = np.linalg.eigvalsh(covariance)
+    if np.any(eigvals < -atol):
+        raise ValueError("Power-spectrum covariance is not positive semidefinite")
+
+    return normalized_cls
+
+
+def _alm_covariance_from_healpy_cls(
+    healpy_cls: Sequence[NDArray[np.float64]],
+) -> NDArray[np.float64]:
+    """Return T/E/B covariance matrices from normalized Healpy spectra."""
+    nells = healpy_cls[0].size
+    matrices = np.zeros((nells, 3, 3), dtype=np.float64)
+    matrices[:, 0, 0] = healpy_cls[0]
+    matrices[:, 1, 1] = healpy_cls[1]
+    matrices[:, 2, 2] = healpy_cls[2]
+    matrices[:, 0, 1] = matrices[:, 1, 0] = healpy_cls[3]
+    matrices[:, 1, 2] = matrices[:, 2, 1] = healpy_cls[4]
+    matrices[:, 0, 2] = matrices[:, 2, 0] = healpy_cls[5]
+    return matrices

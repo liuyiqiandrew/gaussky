@@ -1,11 +1,27 @@
 """Gaussian sky component samplers."""
 
 from .base import GaussianComponent
-from .dust import SimpleModifiedBlackbodyDust
-from .synchrotron import SimplePowerLawSynchrotron
 
 __all__ = [
+    "GaussianCMB",
     "GaussianComponent",
     "SimpleModifiedBlackbodyDust",
     "SimplePowerLawSynchrotron",
 ]
+
+
+def __getattr__(name: str):
+    """Lazily import concrete components when requested."""
+    if name == "GaussianCMB":
+        from .cmb import GaussianCMB
+
+        return GaussianCMB
+    if name == "SimpleModifiedBlackbodyDust":
+        from .dust import SimpleModifiedBlackbodyDust
+
+        return SimpleModifiedBlackbodyDust
+    if name == "SimplePowerLawSynchrotron":
+        from .synchrotron import SimplePowerLawSynchrotron
+
+        return SimplePowerLawSynchrotron
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

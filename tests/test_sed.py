@@ -31,6 +31,18 @@ def test_temperature_conversion_factors_are_inverses():
     )
 
 
+def test_temperature_conversion_uses_legacy_pygsm_tcmb():
+    freq_ghz = np.array([23.0, 93.0, 150.0, 353.0])
+    h_planck = 6.62607015e-34
+    k_boltzmann = 1.380649e-23
+    t_cmb = 2.725
+    x = h_planck * freq_ghz * 1e9 / (k_boltzmann * t_cmb)
+
+    expected_trj_to_tcmb = np.expm1(x) ** 2 / (x**2 * np.exp(x))
+
+    np.testing.assert_allclose(trj_to_tcmb(freq_ghz), expected_trj_to_tcmb)
+
+
 def test_sed_rejects_non_positive_frequency():
     sed = PowerLawSED(beta=-3.0, nu0_ghz=30.0)
 
