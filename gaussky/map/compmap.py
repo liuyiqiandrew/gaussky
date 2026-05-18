@@ -102,6 +102,7 @@ class MultiFreqTotalMap(BaseSignalMap):
     """
 
     components: tuple[MultiFreqCompMap, ...]
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate component compatibility and total-map consistency."""
@@ -124,9 +125,15 @@ class MultiFreqTotalMap(BaseSignalMap):
             raise ValueError("maps must equal the sum of component maps")
 
         object.__setattr__(self, "components", components)
+        object.__setattr__(self, "metadata", normalize_metadata(self.metadata))
 
     @classmethod
-    def from_components(cls, components: Sequence[MultiFreqCompMap]) -> Self:
+    def from_components(
+        cls,
+        components: Sequence[MultiFreqCompMap],
+        *,
+        metadata: Mapping[str, object] | None = None,
+    ) -> Self:
         """Build a total map from compatible component maps.
 
         Parameters
@@ -134,6 +141,8 @@ class MultiFreqTotalMap(BaseSignalMap):
         components : sequence of MultiFreqCompMap
             Component maps to sum. Names must be unique and metadata must be
             compatible for arithmetic.
+        metadata : mapping or None, default=None
+            Optional metadata stored on the total map.
 
         Returns
         -------
@@ -162,6 +171,7 @@ class MultiFreqTotalMap(BaseSignalMap):
             ordering=reference.ordering,
             coord=reference.coord,
             components=component_tuple,
+            metadata={} if metadata is None else metadata,
         )
 
     @property
@@ -195,7 +205,8 @@ class MultiFreqTotalMap(BaseSignalMap):
     def select_field(self, field: SignalField) -> Self:
         """Return a total map with one retained field and matching components."""
         return type(self).from_components(
-            tuple(component.select_field(field) for component in self.components)
+            tuple(component.select_field(field) for component in self.components),
+            metadata=self.metadata,
         )
 
     def select_freq(self, freq_ghz: float, *, atol: float = 0.0) -> Self:
@@ -204,7 +215,8 @@ class MultiFreqTotalMap(BaseSignalMap):
             tuple(
                 component.select_freq(freq_ghz, atol=atol)
                 for component in self.components
-            )
+            ),
+            metadata=self.metadata,
         )
 
     def copy_with(self, **changes: object) -> Self:
@@ -217,7 +229,8 @@ class MultiFreqTotalMap(BaseSignalMap):
             remaining_changes = dict(changes)
             components = remaining_changes.pop("components")
             if isinstance(components, Sequence):
-                total = type(self).from_components(components)
+                metadata = remaining_changes.pop("metadata", self.metadata)
+                total = type(self).from_components(components, metadata=metadata)
                 if remaining_changes:
                     return total.copy_with(**remaining_changes)
                 return total

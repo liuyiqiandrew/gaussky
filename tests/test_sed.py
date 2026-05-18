@@ -36,11 +36,40 @@ def test_temperature_conversion_uses_legacy_pygsm_tcmb():
     h_planck = 6.62607015e-34
     k_boltzmann = 1.380649e-23
     t_cmb = 2.725
-    x = h_planck * freq_ghz * 1e9 / (k_boltzmann * t_cmb)
+    x = h_planck * freq_ghz * 1e9 / t_cmb / k_boltzmann
 
-    expected_trj_to_tcmb = np.expm1(x) ** 2 / (x**2 * np.exp(x))
+    expected_trj_to_tcmb = (np.exp(x) - 1.0) ** 2 / x**2 / np.exp(x)
 
     np.testing.assert_allclose(trj_to_tcmb(freq_ghz), expected_trj_to_tcmb)
+
+
+def test_power_law_sed_scales_maps_with_staged_unit_conversions():
+    sed = PowerLawSED(beta=-3.0, nu0_ghz=23.0)
+    freq_ghz = np.array([30.0, 93.0])
+    maps = np.arange(12, dtype=np.float64).reshape(2, 2, 3)
+
+    expected = maps.copy()
+    expected *= tcmb_to_trj(sed.nu0_ghz)
+    expected *= ((freq_ghz / sed.nu0_ghz) ** sed.beta)[:, None, None]
+    expected *= trj_to_tcmb(freq_ghz)[:, None, None]
+
+    np.testing.assert_array_equal(sed.scale_maps(maps, freq_ghz), expected)
+
+
+def test_modified_blackbody_sed_scales_cls_with_staged_unit_conversions():
+    sed = ModifiedBlackbodySED(beta=1.54, temperature_k=19.6, nu0_ghz=353.0)
+    freq_ghz = np.array([93.0, 150.0])
+    cls = np.arange(8, dtype=np.float64).reshape(2, 4)
+
+    rj_scaling = (freq_ghz / sed.nu0_ghz) ** sed.beta * (
+        planck_rj_spectrum(sed.temperature_k, freq_ghz)
+        / planck_rj_spectrum(sed.temperature_k, sed.nu0_ghz)
+    )
+    expected = np.tile(cls * tcmb_to_trj(sed.nu0_ghz) ** 2, (freq_ghz.size, 1, 1))
+    expected *= rj_scaling[:, None, None] ** 2
+    expected *= trj_to_tcmb(freq_ghz)[:, None, None] ** 2
+
+    np.testing.assert_array_equal(sed.scale_cls(cls, freq_ghz), expected)
 
 
 def test_sed_rejects_non_positive_frequency():

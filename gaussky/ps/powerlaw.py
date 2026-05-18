@@ -153,7 +153,9 @@ class PowerLawCl(AngularPowerSpectrum):
                 # Some literature quotes amplitudes in D_ell; downstream code
                 # consumes C_ell, so apply the standard conversion factor here.
                 dl2cl = np.zeros_like(ell_array)
-                dl2cl[mask] = 2 * np.pi / (ell_array[mask] * (ell_array[mask] + 1.0))
+                dl2cl[mask] = 1.0 / (
+                    ell_array[mask] * (ell_array[mask] + 1.0) / (2.0 * np.pi)
+                )
                 values *= dl2cl
 
         return values

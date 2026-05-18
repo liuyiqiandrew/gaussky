@@ -225,19 +225,41 @@ def test_total_map_is_built_from_compatible_components():
     sync = _component(name="sync", maps=np.ones((2, 2, _npix())))
     dust = _component(name="dust", maps=2.0 * np.ones((2, 2, _npix())))
 
-    total = MultiFreqTotalMap.from_components((sync, dust))
+    total = MultiFreqTotalMap.from_components(
+        (sync, dust),
+        metadata={
+            "seed": 123,
+            "component_seeds": {"sync": 1, "dust": 2},
+        },
+    )
 
     np.testing.assert_allclose(total.maps, 3.0)
     assert not total.maps.flags.writeable
     assert total.components == (sync, dust)
     assert total.component_names == ("sync", "dust")
     assert total.component("dust") is dust
+    assert total.metadata == {
+        "seed": 123,
+        "component_seeds": {"sync": 1, "dust": 2},
+    }
+    with pytest.raises(TypeError):
+        total.metadata["new"] = "value"
 
     selected = total.select_freq(90.0).select_field("Q")
     assert selected.freqs_ghz.tolist() == [90.0]
     assert selected.fields == ("Q",)
+    assert selected.metadata == total.metadata
     np.testing.assert_allclose(selected.maps, 3.0)
     assert all(component.fields == ("Q",) for component in selected.components)
+
+    replaced = total.copy_with(
+        components=(
+            _component(name="sync", maps=3.0 * np.ones((2, 2, _npix()))),
+            _component(name="dust", maps=4.0 * np.ones((2, 2, _npix()))),
+        )
+    )
+    np.testing.assert_allclose(replaced.maps, 7.0)
+    assert replaced.metadata == total.metadata
 
     with pytest.raises(KeyError):
         total.component("cmb")

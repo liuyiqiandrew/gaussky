@@ -50,6 +50,7 @@ class GaussianCMB(GaussianComponent):
         beam_fwhm_rad: BeamFwhm = None,
         ordering: HealpixOrdering = "RING",
         coord: str | None = None,
+        seed: int | None = None,
     ) -> MultiFreqCompMap:
         """Sample a multi-frequency CMB map realization.
 
@@ -71,6 +72,8 @@ class GaussianCMB(GaussianComponent):
             HEALPix ordering for the returned map.
         coord : str or None, default=None
             Optional coordinate-frame label for the returned map.
+        seed : int or None, default=None
+            Optional NumPy legacy RNG seed used for the Healpy realization.
 
         Returns
         -------
@@ -91,6 +94,7 @@ class GaussianCMB(GaussianComponent):
             beam_fwhm_rad=beam_fwhm_rad,
             ordering=ordering,
             coord=coord,
+            seed=seed,
         )
 
 

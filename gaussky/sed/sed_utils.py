@@ -43,8 +43,8 @@ def planck_rj_spectrum(
     """
     _validate_positive_scalar(temperature_k, "temperature_k")
     freq = _positive_frequency_array(freq_ghz)
-    x = H_PLANCK * freq * 1e9 / (K_BOLTZMANN * temperature_k)
-    return freq / np.expm1(x)
+    x = H_PLANCK * freq * 1e9 / K_BOLTZMANN / temperature_k
+    return freq / (np.exp(x) - 1.0)
 
 
 def trj_to_tcmb(freq_ghz: ArrayLike) -> NDArray[np.float64]:
@@ -67,10 +67,8 @@ def trj_to_tcmb(freq_ghz: ArrayLike) -> NDArray[np.float64]:
         If any frequency is not strictly positive.
     """
     freq = _positive_frequency_array(freq_ghz)
-    x = H_PLANCK * freq * 1e9 / (K_BOLTZMANN * T_CMB)
-    # expm1 keeps the low-frequency conversion stable where x is small.
-    expm1_x = np.expm1(x)
-    return expm1_x**2 / (x**2 * np.exp(x))
+    x = H_PLANCK * freq * 1e9 / T_CMB / K_BOLTZMANN
+    return (np.exp(x) - 1.0) ** 2 / x**2 / np.exp(x)
 
 
 def tcmb_to_trj(freq_ghz: ArrayLike) -> NDArray[np.float64]:
@@ -95,8 +93,5 @@ def tcmb_to_trj(freq_ghz: ArrayLike) -> NDArray[np.float64]:
         If any frequency is not strictly positive.
     """
     freq = _positive_frequency_array(freq_ghz)
-    x = H_PLANCK * freq * 1e9 / (K_BOLTZMANN * T_CMB)
-    # Keep this numerically aligned with trj_to_tcmb so the factors remain
-    # reciprocal down to low GHz frequencies.
-    expm1_x = np.expm1(x)
-    return x**2 * np.exp(x) / expm1_x**2
+    x = H_PLANCK * freq * 1e9 / T_CMB / K_BOLTZMANN
+    return x**2 * np.exp(x) / (np.exp(x) - 1.0) ** 2

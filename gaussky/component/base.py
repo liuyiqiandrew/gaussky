@@ -25,6 +25,7 @@ class GaussianComponent(Protocol):
         beam_fwhm_rad: BeamFwhm = None,
         ordering: HealpixOrdering = "RING",
         coord: str | None = None,
+        seed: int | None = None,
     ) -> MultiFreqCompMap:
         """Sample one realization of this component."""
         ...

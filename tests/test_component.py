@@ -41,6 +41,14 @@ class FakeHealpy:
         return np.asarray(maps, dtype=np.float64)[..., ::-1]
 
 
+class RandomHealpy(FakeHealpy):
+    def synfast(self, cls, nside, alm=False, pol=True, new=True):
+        self.synfast_calls.append(
+            {"cls": cls, "nside": nside, "alm": alm, "pol": pol, "new": new}
+        )
+        return np.random.standard_normal((3, self.nside2npix(nside)))
+
+
 class FakeCMBPowerSpectrum:
     unit = "uK_CMB^2"
     a_lens = 0.75
@@ -121,7 +129,7 @@ def test_simple_power_law_synchrotron_samples_scaled_component_map(monkeypatch):
     assert sampled.unit == "uK_CMB"
     assert sampled.ordering == "RING"
     assert sampled.coord == "G"
-    assert sampled.metadata == {"beta_s": -3.0, "nu0_ghz": 30.0}
+    assert sampled.metadata == {"beta_s": -3.0, "nu0_ghz": 30.0, "seed": None}
     assert len(fake.synfast_calls) == 1
     synfast_call = fake.synfast_calls[0]
     assert synfast_call["nside"] == 1
@@ -236,6 +244,7 @@ def test_gaussian_cmb_samples_frequency_independent_map(monkeypatch):
         "a_lens": 0.75,
         "r_tensor": 0.05,
         "template_dir": "/fake/cmb_spec",
+        "seed": None,
     }
     assert len(fake.synfast_calls) == 1
     assert fake.smoothing_calls == []
@@ -324,6 +333,7 @@ def test_simple_modified_blackbody_dust_samples_scaled_component_map(monkeypatch
         "beta_d": 1.6,
         "temp_d": 19.6,
         "nu0_ghz": 353.0,
+        "seed": None,
     }
     assert fake.smoothing_calls == [{"fwhm": 0.05, "pol": True}]
 
@@ -347,3 +357,43 @@ def test_simple_modified_blackbody_dust_rejects_invalid_temperature():
             temp_d=0.0,
             nu0_ghz=353.0,
         )
+
+
+def test_component_seed_reproducibility_and_metadata(monkeypatch):
+    fake = RandomHealpy()
+    monkeypatch.setattr(component_utils, "hp", fake)
+    sampler = _cmb_component()
+
+    maps1 = sampler.sample_map(nside=1, freqs_ghz=[90.0], fields=("T", "Q"), seed=42)
+    maps2 = sampler.sample_map(nside=1, freqs_ghz=[90.0], fields=("T", "Q"), seed=42)
+    maps3 = sampler.sample_map(nside=1, freqs_ghz=[90.0], fields=("T", "Q"), seed=99)
+
+    np.testing.assert_array_equal(maps1.maps, maps2.maps)
+    assert not np.array_equal(maps1.maps, maps3.maps)
+    assert maps1.metadata["seed"] == 42
+
+
+def test_component_seed_does_not_modify_global_numpy_state(monkeypatch):
+    fake = RandomHealpy()
+    monkeypatch.setattr(component_utils, "hp", fake)
+
+    np.random.seed(123)
+    expected = np.random.standard_normal(5)
+
+    np.random.seed(123)
+    _cmb_component().sample_map(nside=1, freqs_ghz=[90.0], fields=("T",), seed=42)
+    actual = np.random.standard_normal(5)
+
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_component_rejects_invalid_seed(monkeypatch):
+    _patch_healpy(monkeypatch)
+    sampler = _dust_component()
+
+    with pytest.raises(TypeError, match="seed"):
+        sampler.sample_map(nside=1, fields=("T",), seed=True)
+    with pytest.raises(ValueError, match="seed"):
+        sampler.sample_map(nside=1, fields=("T",), seed=-1)
+    with pytest.raises(ValueError, match="seed"):
+        sampler.sample_map(nside=1, fields=("T",), seed=2**32)

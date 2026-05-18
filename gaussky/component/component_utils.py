@@ -22,6 +22,7 @@ from gaussky.ps import AngularPowerSpectrum, validate_healpy_cls
 from gaussky.sed import SpectralEnergyDistribution
 
 _FIELD_TO_HEALPY_INDEX: dict[SignalField, int] = {"T": 0, "Q": 1, "U": 2}
+_MAX_NUMPY_LEGACY_SEED = 2**32 - 1
 
 
 def validate_component_name(name: str) -> None:
@@ -30,6 +31,17 @@ def validate_component_name(name: str) -> None:
         raise TypeError("name must be a string")
     if name == "":
         raise ValueError("name must not be empty")
+
+
+def normalize_seed(seed: int | None) -> int | None:
+    """Validate and normalize a NumPy legacy RNG seed."""
+    if seed is None:
+        return None
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise TypeError("seed must be an integer or None")
+    if seed < 0 or seed > _MAX_NUMPY_LEGACY_SEED:
+        raise ValueError(f"seed must be between 0 and {_MAX_NUMPY_LEGACY_SEED}")
+    return int(seed)
 
 
 def _normalize_ordering(ordering: HealpixOrdering) -> HealpixOrdering:
@@ -138,6 +150,30 @@ def _reorder_ring_to_nested(maps: NDArray[np.float64]) -> NDArray[np.float64]:
     return np.asarray(reordered, dtype=np.float64).reshape(original_shape)
 
 
+def _synfast_tqu(
+    healpy_cls: list[NDArray[np.float64]],
+    nside: int,
+    *,
+    seed: int | None,
+) -> NDArray[np.float64]:
+    """Run Healpy synfast with optional legacy NumPy RNG seeding."""
+    if seed is None:
+        return np.asarray(
+            hp.synfast(healpy_cls, nside, alm=False, pol=True, new=True),
+            dtype=np.float64,
+        )
+
+    state = np.random.get_state()
+    try:
+        np.random.seed(seed)
+        return np.asarray(
+            hp.synfast(healpy_cls, nside, alm=False, pol=True, new=True),
+            dtype=np.float64,
+        )
+    finally:
+        np.random.set_state(state)
+
+
 def sample_gaussian_component_map(
     *,
     ps: AngularPowerSpectrum,
@@ -150,6 +186,7 @@ def sample_gaussian_component_map(
     beam_fwhm_rad: BeamFwhm = None,
     ordering: HealpixOrdering = "RING",
     coord: str | None = None,
+    seed: int | None = None,
 ) -> MultiFreqCompMap:
     """Sample a Gaussian component and scale it with an SED.
 
@@ -180,6 +217,8 @@ def sample_gaussian_component_map(
         HEALPix ordering for the returned map.
     coord : str or None, default=None
         Optional coordinate-frame label for the returned map.
+    seed : int or None, default=None
+        Optional NumPy legacy RNG seed used for the Healpy realization.
 
     Returns
     -------
@@ -191,16 +230,14 @@ def sample_gaussian_component_map(
     freqs = _normalize_freqs(freqs_ghz, default_ghz=sed.nu0_ghz)
     normalized_fields = _normalize_fields(fields)
     beam = _normalize_beam(beam_fwhm_rad, freqs.size)
+    normalized_seed = normalize_seed(seed)
     unit = _signal_unit(ps)
 
     lmax = 3 * nside - 1
     healpy_cls = validate_healpy_cls(ps.to_healpy_cls(lmax), lmax)
 
     npix = hp.nside2npix(nside)
-    pivot_tqu = np.asarray(
-        hp.synfast(healpy_cls, nside, alm=False, pol=True, new=True),
-        dtype=np.float64,
-    )
+    pivot_tqu = _synfast_tqu(healpy_cls, nside, seed=normalized_seed)
     if pivot_tqu.shape != (len(SIGNAL_FIELDS), npix):
         raise ValueError("healpy.synfast must return a T/Q/U map with shape (3, npix)")
 
@@ -220,7 +257,11 @@ def sample_gaussian_component_map(
             smoothed_tqu = _smooth_tqu(pivot_tqu, float(channel_beam))
             maps[freq_index] = smoothed_tqu[field_indices]
 
-    maps *= sed.scale(freqs)[:, None, None]
+    scale_maps = getattr(sed, "scale_maps", None)
+    if callable(scale_maps):
+        maps = np.asarray(scale_maps(maps, freqs), dtype=np.float64)
+    else:
+        maps *= sed.scale(freqs)[:, None, None]
 
     if normalized_ordering == "NESTED":
         maps = _reorder_ring_to_nested(maps)
@@ -236,7 +277,7 @@ def sample_gaussian_component_map(
         beam_fwhm_rad=beam,
         component_name=component_name,
         auxiliary_maps={},
-        metadata=metadata,
+        metadata={**metadata, "seed": normalized_seed},
     )
 
 
@@ -251,6 +292,7 @@ def sample_frequency_independent_gaussian_component_map(
     beam_fwhm_rad: BeamFwhm = None,
     ordering: HealpixOrdering = "RING",
     coord: str | None = None,
+    seed: int | None = None,
 ) -> MultiFreqCompMap:
     """Sample a Gaussian component with no frequency-dependent SED.
 
@@ -280,6 +322,8 @@ def sample_frequency_independent_gaussian_component_map(
         HEALPix ordering for the returned map.
     coord : str or None, default=None
         Optional coordinate-frame label for the returned map.
+    seed : int or None, default=None
+        Optional NumPy legacy RNG seed used for the Healpy realization.
 
     Returns
     -------
@@ -291,16 +335,14 @@ def sample_frequency_independent_gaussian_component_map(
     freqs = _normalize_freqs(freqs_ghz)
     normalized_fields = _normalize_fields(fields)
     beam = _normalize_beam(beam_fwhm_rad, freqs.size)
+    normalized_seed = normalize_seed(seed)
     unit = _signal_unit(ps)
 
     lmax = 3 * nside - 1
     healpy_cls = validate_healpy_cls(ps.to_healpy_cls(lmax), lmax)
 
     npix = hp.nside2npix(nside)
-    pivot_tqu = np.asarray(
-        hp.synfast(healpy_cls, nside, alm=False, pol=True, new=True),
-        dtype=np.float64,
-    )
+    pivot_tqu = _synfast_tqu(healpy_cls, nside, seed=normalized_seed)
     if pivot_tqu.shape != (len(SIGNAL_FIELDS), npix):
         raise ValueError("healpy.synfast must return a T/Q/U map with shape (3, npix)")
 
@@ -334,5 +376,5 @@ def sample_frequency_independent_gaussian_component_map(
         beam_fwhm_rad=beam,
         component_name=component_name,
         auxiliary_maps={},
-        metadata=metadata,
+        metadata={**metadata, "seed": normalized_seed},
     )
