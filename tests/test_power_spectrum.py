@@ -160,3 +160,40 @@ def test_cmb_cl_loads_bundled_default_templates():
     assert all(values.shape == (11,) for values in cls)
     np.testing.assert_allclose(cls[HEALPY_POLARIZED_ORDER.index("EB")], 0.0)
     np.testing.assert_allclose(cls[HEALPY_POLARIZED_ORDER.index("TB")], 0.0)
+
+
+def test_cmb_cl_template_cache_invalidates_on_file_mtime(tmp_path):
+    """Editing a template file invalidates the cached load.
+
+    A7 keys the lru_cache on ``(path, no_tensor_mtime_ns, r1_mtime_ns)``,
+    so writes to a template file produce a fresh load instead of a stale
+    cached one.
+    """
+    import os
+    import time
+
+    a = tmp_path / "camb_lens_nobb.dat"
+    b = tmp_path / "camb_lens_r1.dat"
+
+    _write_cmb_template(a, [[i, 1.0, 1.0, 1.0, 0.0] for i in range(1, 6)])
+    _write_cmb_template(b, [[i, 1.0, 1.0, 1.0, 0.0] for i in range(1, 6)])
+    cls_before = CMBCl(template_dir=tmp_path).to_healpy_cls(4)[0]
+
+    # Bump file content and mtime so the cache key changes.
+    time.sleep(0.01)
+    _write_cmb_template(a, [[i, 10.0, 10.0, 10.0, 0.0] for i in range(1, 6)])
+    _write_cmb_template(b, [[i, 10.0, 10.0, 10.0, 0.0] for i in range(1, 6)])
+    new_time = time.time()
+    os.utime(a, (new_time, new_time))
+    os.utime(b, (new_time, new_time))
+
+    cls_after = CMBCl(template_dir=tmp_path).to_healpy_cls(4)[0]
+    assert not np.allclose(cls_before, cls_after)
+
+
+def test_cmb_cl_unit_is_a_classvar_not_a_field():
+    """A7 demoted ``unit`` to ``ClassVar``; passing it as a kwarg now errors."""
+    with pytest.raises(TypeError, match="unit"):
+        CMBCl(unit="K_CMB^2")  # type: ignore[call-arg]
+    # but the class-level constant still resolves
+    assert CMBCl.unit == "uK_CMB^2"

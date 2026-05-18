@@ -1,14 +1,23 @@
 # `gaussky.sed` — spectral energy distributions
 
-An SED in `gaussky` is just a callable that returns dimensionless multiplicative
-scaling factors normalized to one at the reference frequency. The protocol is
-tiny:
+An SED in `gaussky` is a tiny three-method protocol: a per-frequency scalar
+factor (`scale`) plus map and spectrum scaling entry points
+(`scale_maps`, `scale_cls`) that match the operation order of the legacy
+`pygsm` pipeline.
 
 ```python
 class SpectralEnergyDistribution(Protocol):
     nu0_ghz: float
     def scale(self, freq_ghz: ArrayLike) -> NDArray[np.float64]: ...
+    def scale_maps(self, maps: ArrayLike, freq_ghz: ArrayLike) -> NDArray[np.float64]: ...
+    def scale_cls(self, cls: ArrayLike, freq_ghz: ArrayLike) -> NDArray[np.float64]: ...
 ```
+
+The sampling helper in `gaussky.component.component_utils` calls
+`sed.scale_maps(maps, freqs)` (not `sed.scale`), so the staged
+thermodynamic-CMB → RJ → SED → thermodynamic-CMB conversion is applied in
+the same order as `pygsm.Sky`. For analytic per-frequency factors and the
+alm path, `sed.scale(freq)` is the convenience entry.
 
 Conventions:
 
@@ -26,7 +35,26 @@ from gaussky.sed import (
     tcmb_to_trj,
     trj_to_tcmb,
 )
+from gaussky.sed.common import BaseSED  # shared base for staged-scaling SEDs
 ```
+
+## `BaseSED`
+
+`BaseSED` (in `gaussky.sed.common`) is the abstract base the bundled SEDs
+subclass. It implements `scale`, `scale_maps`, and `scale_cls` in terms of
+one abstract hook — `_rj_scaling(freq_ghz)` — that returns the dimensionless
+SED factor in Rayleigh-Jeans temperature units.
+
+```python
+class BaseSED(ABC):
+    nu0_ghz: float
+    @abstractmethod
+    def _rj_scaling(self, freq_ghz): ...
+    # scale, scale_maps, scale_cls inherited
+```
+
+Subclasses declare their model parameters as dataclass fields and implement
+`_rj_scaling`; they get the three Protocol methods for free.
 
 ## `PowerLawSED`
 
@@ -110,26 +138,46 @@ Internally both use `np.expm1` for low-frequency stability and assume
 
 ## Writing your own SED
 
+The recommended path is subclassing `BaseSED` and implementing one method —
+`_rj_scaling` — that returns the dimensionless factor in RJ units. The base
+class wraps that with the staged thermodynamic-CMB conversions so the
+result is consistent with `pygsm` and compatible with
+`sample_component_map`'s `sed.scale_maps(...)` call.
+
+```python
+from dataclasses import dataclass
+
+import numpy as np
+from numpy.typing import NDArray
+
+from gaussky.sed.common import BaseSED
+
+
+@dataclass(frozen=True)
+class FreeFreeSED(BaseSED):
+    """Free-free emission SED with a fixed slope of -2.13 in RJ units."""
+
+    nu0_ghz: float = 30.0
+
+    def _rj_scaling(self, freq_ghz: NDArray[np.float64]) -> NDArray[np.float64]:
+        return (freq_ghz / self.nu0_ghz) ** -2.13
+```
+
+That's it — `scale`, `scale_maps`, and `scale_cls` are inherited and satisfy
+the Protocol. Sanity check:
+
 ```python
 import numpy as np
-from numpy.typing import ArrayLike, NDArray
-from gaussky.sed import tcmb_to_trj, trj_to_tcmb
 
-class FreeFreeSED:
-    """Free-free emission SED (T_e ~ 7000 K), normalized to one at nu0."""
-
-    def __init__(self, nu0_ghz: float, T_e: float = 7000.0) -> None:
-        if nu0_ghz <= 0:
-            raise ValueError("nu0_ghz must be > 0")
-        self.nu0_ghz = float(nu0_ghz)
-        self.T_e = float(T_e)
-
-    def scale(self, freq_ghz: ArrayLike) -> NDArray[np.float64]:
-        freq = np.asarray(freq_ghz, dtype=np.float64)
-        rj_scale = (freq / self.nu0_ghz) ** -2.13
-        # mirror the same unit convention as the bundled SEDs
-        return trj_to_tcmb(freq) * tcmb_to_trj(self.nu0_ghz) * rj_scale
+sed = FreeFreeSED(nu0_ghz=30.0)
+np.testing.assert_allclose(sed.scale(30.0), 1.0)
 ```
+
+If you cannot subclass `BaseSED` (e.g. you're wrapping an external SED), a
+standalone class that implements `scale`, `scale_maps`, and `scale_cls`
+directly still satisfies the Protocol — it's structural. Use
+`gaussky.sed.tcmb_to_trj`/`trj_to_tcmb` to keep the RJ ⇄ CMB wrapping
+consistent.
 
 Drop it into a new `GaussianComponent` — see [Extending gaussky](../examples/extending.md).
 

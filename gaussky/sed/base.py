@@ -1,4 +1,4 @@
-"""Shared protocol for frequency-dependent SED scaling models."""
+"""Protocol for frequency-dependent SED scaling models."""
 
 from __future__ import annotations
 
@@ -7,50 +7,51 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from gaussky._validation import (
+    positive_frequency_array as _positive_frequency_array,
+    validate_finite_scalar as _validate_finite_scalar,
+    validate_positive_scalar as _validate_positive_scalar,
+)
+
+__all__ = [
+    "SpectralEnergyDistribution",
+    "_positive_frequency_array",
+    "_validate_finite_scalar",
+    "_validate_positive_scalar",
+]
+
 
 class SpectralEnergyDistribution(Protocol):
     """Frequency scaling for a sky component.
 
-    Implementations return dimensionless multiplicative factors normalized at
-    ``nu0_ghz``. Frequencies are always specified in GHz.
+    Implementations expose three related entry points:
+
+    - :meth:`scale` returns the dimensionless per-frequency scaling factor
+      (broadcastable along the frequency axis). The factor equals one at
+      ``nu0_ghz`` by construction.
+    - :meth:`scale_maps` applies the staged thermodynamic-CMB → RJ → SED →
+      thermodynamic-CMB conversion to an array whose **leading axis is
+      frequency**, matching the operation order of the legacy ``pygsm``
+      implementation. Use this when scaling sampled signal maps.
+    - :meth:`scale_cls` applies the equivalent staged conversion to angular
+      power spectra (factors enter squared). Use this when scaling spectra.
+
+    Frequencies are always in GHz.
     """
 
     nu0_ghz: float
 
     def scale(self, freq_ghz: ArrayLike) -> NDArray[np.float64]:
-        """Evaluate the SED scaling at one or more frequencies.
+        """Return the dimensionless per-frequency scaling factor."""
 
-        Parameters
-        ----------
-        freq_ghz : array_like
-            Frequency or frequencies in GHz.
+    def scale_maps(self, maps: ArrayLike, freq_ghz: ArrayLike) -> NDArray[np.float64]:
+        """Scale maps from ``nu0_ghz`` to each ``freq_ghz`` channel.
 
-        Returns
-        -------
-        ndarray
-            Dimensionless scaling factors with the same broadcast shape as
-            ``freq_ghz``.
+        ``maps`` must have its leading axis equal to ``len(freq_ghz)``. The
+        return value has the same shape as ``maps`` (with a leading axis
+        of size ``freq_ghz.size`` when ``freq_ghz`` is a scalar promoted to
+        a 1-element vector).
         """
-        ...
 
-
-def _validate_finite_scalar(value: float, name: str) -> float:
-    """Return a scalar after finite-value validation."""
-    if not np.isfinite(value):
-        raise ValueError(f"{name} must be finite")
-    return value
-
-
-def _validate_positive_scalar(value: float, name: str) -> float:
-    """Return a scalar after strict positivity validation."""
-    if value <= 0.0:
-        raise ValueError(f"{name} must be strictly positive")
-    return value
-
-
-def _positive_frequency_array(freq_ghz: ArrayLike) -> NDArray[np.float64]:
-    """Return frequencies as a float array after positivity validation."""
-    array = np.asarray(freq_ghz, dtype=np.float64)
-    if np.any(~np.isfinite(array)) or np.any(array <= 0.0):
-        raise ValueError("freq_ghz must contain finite positive values")
-    return array
+    def scale_cls(self, cls: ArrayLike, freq_ghz: ArrayLike) -> NDArray[np.float64]:
+        """Scale angular power spectra from ``nu0_ghz`` to each ``freq_ghz``."""

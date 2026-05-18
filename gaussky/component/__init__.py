@@ -1,8 +1,10 @@
 """Gaussian sky component samplers."""
 
 from .base import GaussianComponent
+from .sed_backed import BaseSEDBackedComponent
 
 __all__ = [
+    "BaseSEDBackedComponent",
     "GaussianCMB",
     "GaussianComponent",
     "SimpleModifiedBlackbodyDust",

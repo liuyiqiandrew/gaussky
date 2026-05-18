@@ -39,12 +39,25 @@ require a working FFT backend.
 
 ```
 gaussky/
+├── __init__.py         ← top-level public API re-exports
 ├── conventions.py      ← shared types, units, and orderings
-├── sampler.py          ← high-level entry point
+├── _validation.py      ← single source for normalize_* / validate_* helpers
+├── units.py            ← extensible power-spectrum → signal-unit registry
+├── sampler.py          ← high-level entry point (defaults + per-call overrides)
 ├── ps/                 ← angular power spectra (C_ell models)
 ├── sed/                ← spectral energy distributions
+│   ├── base.py             ← SpectralEnergyDistribution Protocol
+│   ├── common.py           ← BaseSED + PowerLawSED + ModifiedBlackbodySED
+│   └── sed_utils.py        ← planck_rj_spectrum, trj_to_tcmb, tcmb_to_trj
 ├── component/          ← Gaussian sky components (ps + sed binders)
-├── map/                ← validated map containers
+│   ├── base.py             ← GaussianComponent Protocol
+│   ├── sed_backed.py       ← BaseSEDBackedComponent mixin
+│   ├── component_utils.py  ← sample_component_map, sample_component_alm
+│   ├── cmb/                ← GaussianCMB
+│   ├── dust/               ← SimpleModifiedBlackbodyDust (+ future variants)
+│   └── synchrotron/        ← SimplePowerLawSynchrotron (+ future variants)
+├── map/                ← validated containers (signal map + alm)
+├── templates/          ← cross-cutting auxiliary-template loaders
 └── data/cmb_spec/      ← bundled CAMB CMB templates (D_ell)
 ```
 
@@ -66,27 +79,36 @@ template at three frequencies.
 ```python
 import numpy as np
 
-from gaussky.component import GaussianCMB
-from gaussky.sampler import Sampler
+from gaussky import GaussianCMB, Sampler
 
-cmb = GaussianCMB()  # default a_lens=1.0, r_tensor=0.0, bundled templates
-sampler = Sampler(nside=64)
-
-sky = sampler.sample(
-    cmb,
+sampler = Sampler(
+    nside=64,
     fields=("T", "Q", "U"),
     freqs_ghz=np.array([30.0, 90.0, 150.0]),
+    seed=42,
 )
+sky = sampler.sample(GaussianCMB())  # default a_lens=1.0, r_tensor=0.0
 
 print(sky.maps.shape)        # (3, 3, 49152)  -- (nfreq, nfield, npix)
 print(sky.unit)              # 'uK_CMB'
 print(sky.component_name)    # 'cmb'
-print(sky.metadata)          # MappingProxyType({'a_lens': 1.0, 'r_tensor': 0.0, ...})
+print(sky.metadata)          # MappingProxyType({'a_lens': 1.0, 'r_tensor': 0.0, ..., 'seed': 42})
 ```
 
 The CMB component samples the spectrum once and replicates the same realization
 across the requested frequency channels (CMB has no SED). Per-frequency beam
 smoothing is still supported — see [Components](reference/component.md).
+
+Same call with a different seed reproduces a different draw without touching
+the sampler:
+
+```python
+other = sampler.sample(GaussianCMB(), seed=7)
+assert not (sky.maps == other.maps).all()
+
+# Or replace the sampler's default seed for the rest of the session:
+sampler_v2 = sampler.with_(seed=2025)
+```
 
 ## Next steps
 

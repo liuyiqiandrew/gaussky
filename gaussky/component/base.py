@@ -26,6 +26,7 @@ class GaussianComponent(Protocol):
         ordering: HealpixOrdering = "RING",
         coord: str | None = None,
         seed: int | None = None,
+        lmax: int | None = None,
     ) -> MultiFreqCompMap:
         """Sample one realization of this component."""
         ...

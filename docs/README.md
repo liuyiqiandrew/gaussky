@@ -52,13 +52,11 @@ A typical multi-frequency sky simulation reads end to end like this:
 ```python
 import numpy as np
 
-from gaussky.component import (
-    GaussianCMB,
-    SimpleModifiedBlackbodyDust,
-    SimplePowerLawSynchrotron,
+from gaussky import (
+    GaussianCMB, Sampler,
+    SimpleModifiedBlackbodyDust, SimplePowerLawSynchrotron,
 )
 from gaussky.ps import CMBCl, PowerLawCl
-from gaussky.sampler import Sampler
 
 cmb = GaussianCMB(ps=CMBCl(a_lens=1.0, r_tensor=0.0))
 sync = SimplePowerLawSynchrotron(
@@ -73,15 +71,38 @@ dust = SimpleModifiedBlackbodyDust(
     nu0_ghz=353.0,
 )
 
-sampler = Sampler(nside=128)
-total = sampler.sample(
-    [cmb, sync, dust],
+sampler = Sampler(
+    nside=128,
     fields=("T", "Q", "U"),
     freqs_ghz=np.array([30.0, 90.0, 150.0, 220.0, 353.0]),
     beam_fwhm_rad=np.deg2rad(np.array([0.5, 0.3, 0.2, 0.15, 0.1])),
+    seed=2025,
 )
+total = sampler.sample([cmb, sync, dust])
 
 # total.maps has shape (nfreq=5, nfield=3, npix=12*128**2) in uK_CMB
+# total.metadata records the root seed and the per-component child seeds
+```
+
+The same scene with a different seed:
+
+```python
+total_v2 = sampler.with_(seed=7).sample([cmb, sync, dust])
+```
+
+Or band-limited to a custom `lmax`, or grab harmonic-space output:
+
+```python
+total_band = sampler.sample([cmb, sync, dust], lmax=64)
+
+from gaussky.component.component_utils import sample_component_alm
+alm = sample_component_alm(
+    ps=cmb.ps, sed=None,
+    component_name="cmb", metadata={"r_tensor": 0.0},
+    lmax=128, fields=("T", "E", "B"),
+    freqs_ghz=[150.0], seed=2025,
+)
+# alm.alms has shape (1, 3, hp.Alm.getsize(128))
 ```
 
 If you just want to run the package, jump to

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -17,8 +18,64 @@ from .base import (
 from .sed_utils import planck_rj_spectrum, tcmb_to_trj, trj_to_tcmb
 
 
+class BaseSED(ABC):
+    """Shared scaffolding for SEDs that use the staged RJ ⇄ CMB conversion.
+
+    Subclasses implement :meth:`_rj_scaling`, the dimensionless factor that
+    is one at ``nu0_ghz`` in Rayleigh-Jeans temperature units. This base
+    class owns the three public methods declared by
+    :class:`SpectralEnergyDistribution` and wraps ``_rj_scaling`` with the
+    appropriate thermodynamic-CMB conversions so callers consistently receive
+    factors in ``uK_CMB``.
+
+    The class is deliberately not a ``@dataclass`` itself; subclasses
+    decorate themselves with ``@dataclass(frozen=True)`` and declare their
+    own ``nu0_ghz`` field (plus any model-specific parameters).
+    """
+
+    nu0_ghz: float
+
+    @abstractmethod
+    def _rj_scaling(self, freq_ghz: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Return the SED scaling at ``freq_ghz`` in RJ temperature units."""
+
+    def scale(self, freq_ghz: ArrayLike) -> NDArray[np.float64]:
+        """Evaluate the dimensionless per-frequency SED scaling.
+
+        Returns the lumped factor ``trj_to_tcmb(freq) * tcmb_to_trj(nu0_ghz)
+        * _rj_scaling(freq)``. By construction this equals one at
+        ``self.nu0_ghz``.
+        """
+        freq = _positive_frequency_array(freq_ghz)
+        return trj_to_tcmb(freq) * tcmb_to_trj(self.nu0_ghz) * self._rj_scaling(freq)
+
+    def scale_maps(self, maps: ArrayLike, freq_ghz: ArrayLike) -> NDArray[np.float64]:
+        """Scale pivot-frequency maps with the staged RJ/CMB pipeline.
+
+        Applies the same operation order as ``pygsm.Sky``: convert pivot
+        maps from thermodynamic CMB to RJ units, apply the RJ-unit SED
+        scaling per frequency, then convert each frequency channel back to
+        thermodynamic CMB units.
+        """
+        return _scale_maps_like_pygsm(
+            maps,
+            freq_ghz,
+            nu0_ghz=self.nu0_ghz,
+            rj_scaling=self._rj_scaling,
+        )
+
+    def scale_cls(self, cls: ArrayLike, freq_ghz: ArrayLike) -> NDArray[np.float64]:
+        """Scale pivot-frequency angular power spectra with the staged pipeline."""
+        return _scale_cls_like_pygsm(
+            cls,
+            freq_ghz,
+            nu0_ghz=self.nu0_ghz,
+            rj_scaling=self._rj_scaling,
+        )
+
+
 @dataclass(frozen=True)
-class ModifiedBlackbodySED(SpectralEnergyDistribution):
+class ModifiedBlackbodySED(BaseSED, SpectralEnergyDistribution):
     """Modified blackbody SED normalized in thermodynamic CMB units.
 
     Parameters
@@ -47,56 +104,6 @@ class ModifiedBlackbodySED(SpectralEnergyDistribution):
         _validate_positive_scalar(self.temperature_k, "temperature_k")
         _validate_positive_scalar(self.nu0_ghz, "nu0_ghz")
 
-    def scale(self, freq_ghz: ArrayLike) -> NDArray[np.float64]:
-        """Evaluate the dimensionless SED scaling.
-
-        Parameters
-        ----------
-        freq_ghz : array_like
-            Frequency or frequencies in GHz.
-
-        Returns
-        -------
-        ndarray
-            Scaling from the reference frequency to ``freq_ghz`` in
-            thermodynamic CMB temperature units.
-
-        Raises
-        ------
-        ValueError
-            If any requested frequency is not strictly positive.
-        """
-        freq = _positive_frequency_array(freq_ghz)
-        # The spectral index and greybody factor are naturally expressed in
-        # Rayleigh-Jeans temperature units; wrap them with the inverse unit
-        # conversions so callers receive thermodynamic CMB scaling factors.
-        unit_conversion = trj_to_tcmb(freq) * tcmb_to_trj(self.nu0_ghz)
-        return unit_conversion * self._rj_scaling(freq)
-
-    def scale_maps(self, maps: ArrayLike, freq_ghz: ArrayLike) -> NDArray[np.float64]:
-        """Scale pivot-frequency maps using staged RJ/CMB conversions.
-
-        This applies the same operation order used by the legacy ``pygsm``
-        implementation: convert pivot maps from thermodynamic CMB to RJ units,
-        apply the RJ modified-blackbody scaling, then convert each frequency
-        channel back to thermodynamic CMB units.
-        """
-        return _scale_maps_like_pygsm(
-            maps,
-            freq_ghz,
-            nu0_ghz=self.nu0_ghz,
-            rj_scaling=self._rj_scaling,
-        )
-
-    def scale_cls(self, cls: ArrayLike, freq_ghz: ArrayLike) -> NDArray[np.float64]:
-        """Scale pivot-frequency spectra using staged RJ/CMB conversions."""
-        return _scale_cls_like_pygsm(
-            cls,
-            freq_ghz,
-            nu0_ghz=self.nu0_ghz,
-            rj_scaling=self._rj_scaling,
-        )
-
     def _rj_scaling(self, freq_ghz: NDArray[np.float64]) -> NDArray[np.float64]:
         """Evaluate the RJ-unit modified-blackbody scaling."""
         return (freq_ghz / self.nu0_ghz) ** self.beta * (
@@ -106,7 +113,7 @@ class ModifiedBlackbodySED(SpectralEnergyDistribution):
 
 
 @dataclass(frozen=True)
-class PowerLawSED(SpectralEnergyDistribution):
+class PowerLawSED(BaseSED, SpectralEnergyDistribution):
     """Power-law SED normalized in thermodynamic CMB units.
 
     Parameters
@@ -129,50 +136,6 @@ class PowerLawSED(SpectralEnergyDistribution):
         """Validate scalar SED parameters."""
         _validate_finite_scalar(self.beta, "beta")
         _validate_positive_scalar(self.nu0_ghz, "nu0_ghz")
-
-    def scale(self, freq_ghz: ArrayLike) -> NDArray[np.float64]:
-        """Evaluate the dimensionless SED scaling.
-
-        Parameters
-        ----------
-        freq_ghz : array_like
-            Frequency or frequencies in GHz.
-
-        Returns
-        -------
-        ndarray
-            Scaling from the reference frequency to ``freq_ghz`` in
-            thermodynamic CMB temperature units.
-
-        Raises
-        ------
-        ValueError
-            If any requested frequency is not strictly positive.
-        """
-        freq = _positive_frequency_array(freq_ghz)
-        # Apply the same thermodynamic/RJ convention as the modified
-        # blackbody model so all SEDs share an output unit convention.
-        unit_conversion = trj_to_tcmb(freq) * tcmb_to_trj(self.nu0_ghz)
-        rj_scaling = (freq / self.nu0_ghz) ** self.beta
-        return unit_conversion * rj_scaling
-
-    def scale_maps(self, maps: ArrayLike, freq_ghz: ArrayLike) -> NDArray[np.float64]:
-        """Scale pivot-frequency maps using staged RJ/CMB conversions."""
-        return _scale_maps_like_pygsm(
-            maps,
-            freq_ghz,
-            nu0_ghz=self.nu0_ghz,
-            rj_scaling=self._rj_scaling,
-        )
-
-    def scale_cls(self, cls: ArrayLike, freq_ghz: ArrayLike) -> NDArray[np.float64]:
-        """Scale pivot-frequency spectra using staged RJ/CMB conversions."""
-        return _scale_cls_like_pygsm(
-            cls,
-            freq_ghz,
-            nu0_ghz=self.nu0_ghz,
-            rj_scaling=self._rj_scaling,
-        )
 
     def _rj_scaling(self, freq_ghz: NDArray[np.float64]) -> NDArray[np.float64]:
         """Evaluate the RJ-unit power-law scaling."""

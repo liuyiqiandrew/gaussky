@@ -1,9 +1,10 @@
 # `gaussky.component` — Gaussian sky components
 
-A component binds an `AngularPowerSpectrum` and (optionally) an
+A component binds an `AngularPowerSpectrum` and (optionally) a
 `SpectralEnergyDistribution` and exposes the sampling entry point that
-`Sampler` calls. The package ships three concrete components and one shared
-sampling pipeline.
+`Sampler` calls. The package ships three concrete components, the
+`BaseSEDBackedComponent` mixin every SED-backed component subclasses, and
+two shared sampling helpers (map and alm).
 
 ```python
 from gaussky.component import (
@@ -12,11 +13,28 @@ from gaussky.component import (
     SimpleModifiedBlackbodyDust,    # dust foreground
     SimplePowerLawSynchrotron,      # synchrotron foreground
 )
+# or, equivalently, the flat top-level surface:
+from gaussky import (
+    GaussianCMB, GaussianComponent,
+    SimpleModifiedBlackbodyDust, SimplePowerLawSynchrotron,
+)
 ```
 
-The package lazy-imports the concrete classes through `__getattr__`, so
-registering a new bundled component means adding it to the lookup in
-`gaussky/component/__init__.py`.
+Internally the package is a directory of sub-packages, one per category:
+
+```
+gaussky/component/
+├── base.py            # GaussianComponent Protocol
+├── sed_backed.py      # BaseSEDBackedComponent mixin
+├── component_utils.py # sample_component_map, sample_component_alm
+├── cmb/               # cmb/__init__.py re-exports lensed.GaussianCMB
+├── dust/              # dust/__init__.py re-exports simple_mbb.SimpleModifiedBlackbodyDust
+└── synchrotron/       # synchrotron/__init__.py re-exports simple_powerlaw.SimplePowerLawSynchrotron
+```
+
+`gaussky/component/__init__.py` lazy-imports each concrete class through
+`__getattr__` so the flat public surface stays cheap. Register new public
+components there.
 
 ## The protocol
 
@@ -34,6 +52,8 @@ class GaussianComponent(Protocol):
         beam_fwhm_rad: BeamFwhm = None,
         ordering: HealpixOrdering = "RING",
         coord: str | None = None,
+        seed: int | None = None,
+        lmax: int | None = None,
     ) -> MultiFreqCompMap: ...
 ```
 
@@ -45,10 +65,38 @@ Key facts:
 - All arguments to `sample_map` are keyword-only.
 - `freqs_ghz` defaults to `None`. SED-backed components fall back to their
   pivot frequency `nu0_ghz`; CMB requires a frequency grid (no pivot exists).
+- `seed` is an optional NumPy legacy RNG seed. The helper save/restores the
+  global RNG around `hp.synfast` so the draw is deterministic without
+  leaking the seeded state.
+- `lmax` defaults to `3 * nside - 1` when `None`; pass an explicit value to
+  band-limit or to over-sample the realization.
+
+## `BaseSEDBackedComponent`
+
+The mixin (in `gaussky.component.sed_backed`) every SED-backed component
+subclasses. It owns the `name` validation, the SED cache, the `sed`
+property, and the default `sample_map` that delegates to
+`sample_component_map(...)`.
+
+```python
+@dataclass(frozen=True, kw_only=True)
+class BaseSEDBackedComponent(GaussianComponent):
+    ps: AngularPowerSpectrum
+    name: str
+    _sed: SpectralEnergyDistribution = field(init=False, repr=False, compare=False)
+
+    def _build_sed(self) -> SpectralEnergyDistribution: ...   # subclass override
+    def _metadata(self) -> Mapping[str, object]: ...          # subclass override
+```
+
+Subclasses declare their model fields (including their own narrowly-typed
+`ps` and a default for `name`) and implement `_build_sed` and `_metadata`.
+Frequency-independent components (CMB-like) skip the mixin and implement
+the Protocol directly. See the bundled components below for the pattern.
 
 ## `SimplePowerLawSynchrotron`
 
-Frozen dataclass: `PowerLawCl` × `PowerLawSED`.
+Subclass of `BaseSEDBackedComponent`. Pairs `PowerLawCl` with `PowerLawSED`.
 
 | Field        | Default          | Meaning                                                  |
 |--------------|------------------|----------------------------------------------------------|
@@ -57,8 +105,9 @@ Frozen dataclass: `PowerLawCl` × `PowerLawSED`.
 | `nu0_ghz`    | (required)       | Pivot frequency in GHz.                                  |
 | `name`       | `"synchrotron"`  | Component label.                                         |
 
-The internal SED `_sed = PowerLawSED(beta=beta_s, nu0_ghz=nu0_ghz)` is cached
-in `__post_init__`. Access via `component.sed`.
+The mixin's `__post_init__` validates the name and caches
+`_sed = PowerLawSED(beta=beta_s, nu0_ghz=nu0_ghz)`. Access via
+`component.sed`.
 
 ### Example
 
@@ -86,7 +135,7 @@ sampled.metadata     # MappingProxyType({'beta_s': -3.1, 'nu0_ghz': 23.0})
 
 ## `SimpleModifiedBlackbodyDust`
 
-Frozen dataclass: `PowerLawCl` × `ModifiedBlackbodySED`.
+Subclass of `BaseSEDBackedComponent`. Pairs `PowerLawCl` with `ModifiedBlackbodySED`.
 
 | Field        | Default     | Meaning                                                       |
 |--------------|-------------|---------------------------------------------------------------|
@@ -150,96 +199,158 @@ sampled.metadata['r_tensor']   # 0.03
 
 ## What `sample_map` actually does
 
-All three components delegate to one of two helpers in
+Every component delegates to one unified helper in
 `gaussky/component/component_utils.py`:
 
-| Helper                                                       | Used by                              |
-|--------------------------------------------------------------|--------------------------------------|
-| `sample_gaussian_component_map`                              | synchrotron, dust (SED-backed)       |
-| `sample_frequency_independent_gaussian_component_map`        | CMB (no SED)                         |
+```python
+sample_component_map(
+    *,
+    ps: AngularPowerSpectrum,
+    sed: SpectralEnergyDistribution | None,
+    component_name: str,
+    metadata: Mapping[str, object],
+    nside: int,
+    fields: tuple[SignalField, ...],
+    freqs_ghz: ArrayLike | None = None,
+    beam_fwhm_rad: BeamFwhm = None,
+    ordering: HealpixOrdering = "RING",
+    coord: str | None = None,
+    seed: int | None = None,
+    lmax: int | None = None,
+) -> MultiFreqCompMap
+```
 
-Both helpers:
+Behaviour:
 
-1. validate `nside` (positive power of two);
-2. normalize `freqs_ghz` (positive 1-D array of finite floats; SED-backed
-   helpers fall back to `sed.nu0_ghz` if `None`);
+1. validate `nside` (positive power of two), `lmax` (non-negative int when
+   given; `None` resolves to `3 * nside - 1`);
+2. normalize `freqs_ghz` (positive 1-D array of finite floats; when `sed` is
+   given and `freqs_ghz is None`, fall back to `sed.nu0_ghz`; when `sed is
+   None`, `freqs_ghz` is required);
 3. normalize `fields` (preserve order, reject anything outside `T, Q, U`);
 4. normalize `beam_fwhm_rad` (scalar or shape `(nfreq,)`);
-5. translate `ps.unit` to a signal unit (currently `uK_CMB^2` → `uK_CMB`);
-6. compute `lmax = 3 * nside - 1`;
-7. call `ps.to_healpy_cls(lmax)` and run `validate_healpy_cls`;
-8. call `hp.synfast(..., pol=True, new=True)` to produce a `(3, npix)` pivot
-   T/Q/U map;
-9. apply beam smoothing with `hp.smoothing(pol=True)`:
+5. translate `ps.unit` to a signal unit via
+   `gaussky.units.signal_unit_for(...)` (default registry maps
+   `uK_CMB^2 → uK_CMB`);
+6. call `ps.to_healpy_cls(lmax)` and run `validate_healpy_cls`;
+7. call `hp.synfast(..., pol=True, new=True)` to produce a `(3, npix)`
+   pivot T/Q/U map; when `seed` is given, save/restore the NumPy global
+   RNG around the call;
+8. apply beam smoothing with `hp.smoothing(pol=True)`:
    - **scalar beam:** smooth once, broadcast across all frequencies;
    - **per-channel beam:** loop and smooth one channel at a time;
    - **`None`:** skip smoothing;
-10. for SED-backed components, multiply by `sed.scale(freqs)[:, None, None]`;
-    for CMB, skip;
-11. reorder RING→NESTED if `ordering="NESTED"`;
-12. wrap in a `MultiFreqCompMap` with `component_name`, `metadata`,
-    `auxiliary_maps={}`, and the requested `freqs_ghz`, `fields`, `beam`,
-    `coord`.
+9. when `sed` is given, apply `sed.scale_maps(maps, freqs)` (staged RJ ⇄ CMB
+   pipeline); when `sed is None`, broadcast the pivot map across the
+   frequency axis instead;
+10. reorder RING → NESTED if `ordering="NESTED"`;
+11. wrap in a `MultiFreqCompMap` with `component_name`, `metadata` (the
+    helper stitches `seed` in), `auxiliary_maps={}`, and the requested
+    `freqs_ghz`, `fields`, `beam`, `coord`.
+
+A parallel helper `sample_component_alm(*, ps, sed, lmax, ...)` returns a
+[`MultiFreqCompAlm`](map.md#multifreqcompalm) container — T/E/B alm
+coefficients without going through `hp.alm2map`. SED-backed alms use
+`sed.scale(freq)` per channel; CMB-style alms broadcast the same pivot
+across the frequency axis. No beam smoothing is applied in alm space —
+combine with `healpy.gauss_beam` (or a custom `bl`) downstream.
 
 ### `validate_component_name(name)`
 
-Tiny shared validator that rejects empty strings and non-strings. Called from
-the `__post_init__` of every bundled component.
+Tiny shared validator that rejects empty strings and non-strings. Called
+from the `__post_init__` of every bundled component (via the
+`BaseSEDBackedComponent` mixin for SED-backed ones, directly for CMB).
 
 ## Writing your own component
 
-The minimum looks like this:
+For an SED-backed component, subclass `BaseSEDBackedComponent` and only
+implement `_build_sed` and `_metadata`. The mixin owns name validation, the
+SED cache, the `sed` property, and the `sample_map` delegation.
 
 ```python
+from collections.abc import Mapping
 from dataclasses import dataclass
-from gaussky.component import GaussianComponent
-from gaussky.component.component_utils import (
-    sample_gaussian_component_map,
-    validate_component_name,
-)
-from gaussky.conventions import HealpixOrdering, SignalField
-from gaussky.map import BeamFwhm, MultiFreqCompMap
+
+from gaussky.component import BaseSEDBackedComponent
 from gaussky.ps import PowerLawCl
 from gaussky.sed import PowerLawSED
 
+
 @dataclass(frozen=True, kw_only=True)
-class MyAme(GaussianComponent):
+class GaussianAME(BaseSEDBackedComponent):
+    """Anomalous microwave emission with a fixed-slope power-law SED."""
+
     ps: PowerLawCl
     nu0_ghz: float
     name: str = "ame"
 
+    def _build_sed(self) -> PowerLawSED:
+        return PowerLawSED(beta=-3.5, nu0_ghz=self.nu0_ghz)
+
+    def _metadata(self) -> Mapping[str, object]:
+        return {"nu0_ghz": self.nu0_ghz}
+```
+
+For a frequency-independent component (CMB-style), implement the protocol
+directly and call `sample_component_map(sed=None, ...)`:
+
+```python
+from dataclasses import dataclass
+
+from gaussky.component import GaussianComponent
+from gaussky.component.component_utils import (
+    sample_component_map,
+    validate_component_name,
+)
+from gaussky.ps import PowerLawCl
+
+
+@dataclass(frozen=True, kw_only=True)
+class GaussianFrequencyFlat(GaussianComponent):
+    ps: PowerLawCl
+    name: str = "flat"
+
     def __post_init__(self) -> None:
         validate_component_name(self.name)
 
-    @property
-    def sed(self) -> PowerLawSED:
-        # Replace with the SED that fits your model.
-        return PowerLawSED(beta=-3.5, nu0_ghz=self.nu0_ghz)
-
-    def sample_map(self, *, nside, fields, freqs_ghz=None,
-                   beam_fwhm_rad=None, ordering="RING", coord=None):
-        return sample_gaussian_component_map(
+    def sample_map(
+        self,
+        *,
+        nside,
+        fields,
+        freqs_ghz=None,
+        beam_fwhm_rad=None,
+        ordering="RING",
+        coord=None,
+        seed=None,
+        lmax=None,
+    ):
+        return sample_component_map(
             ps=self.ps,
-            sed=self.sed,
+            sed=None,
             component_name=self.name,
-            metadata={"nu0_ghz": self.nu0_ghz},
-            nside=nside, fields=fields, freqs_ghz=freqs_ghz,
-            beam_fwhm_rad=beam_fwhm_rad, ordering=ordering, coord=coord,
+            metadata={},
+            nside=nside,
+            fields=fields,
+            freqs_ghz=freqs_ghz,
+            beam_fwhm_rad=beam_fwhm_rad,
+            ordering=ordering,
+            coord=coord,
+            seed=seed,
+            lmax=lmax,
         )
 ```
 
 Tips:
 
-- Reuse `sample_gaussian_component_map` or
-  `sample_frequency_independent_gaussian_component_map`. They centralize every
-  validation and ordering step.
+- Reuse `sample_component_map`. It centralizes every validation, seeding,
+  and ordering step.
 - Use `@dataclass(frozen=True, kw_only=True)` so users get the same
   immutable, keyword-only construction as the bundled components.
-- Cache derived objects (like an internal SED) using
-  `object.__setattr__(self, "_field_name", value)` inside `__post_init__`, the
-  same pattern used by `SimplePowerLawSynchrotron`.
-- Add the class to `gaussky/component/__init__.py`'s `__all__` and the
-  `__getattr__` lazy-import switch if you want it to be discoverable via
-  `from gaussky.component import MyAme`.
+- Put your component file under `gaussky/component/<category>/` (existing
+  categories are `cmb/`, `dust/`, `synchrotron/`). Add the variant to the
+  category's `__init__.py` and to the top-level
+  `gaussky/component/__init__.py`'s `__all__` + `__getattr__` switch if you
+  want it discoverable via `from gaussky.component import …`.
 
 See [Extending gaussky](../examples/extending.md) for a runnable walkthrough.

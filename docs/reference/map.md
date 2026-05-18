@@ -1,7 +1,8 @@
 # `gaussky.map` — map containers
 
 The `map` subpackage holds the validated, frozen dataclass containers every
-sampled map flows through. There are five public types and one type alias:
+sampled product flows through, plus a sibling alm container for harmonic-space
+output. Public types and one type alias:
 
 ```python
 from gaussky.map import (
@@ -11,6 +12,7 @@ from gaussky.map import (
     BeamFwhm,                      # float | NDArray[float64] | None
     HealpixMapContainer,           # protocol (generic HEALPix)
     SignalMapContainer,            # protocol (signal map)
+    MultiFreqCompAlm,              # one component, harmonic space
     MultiFreqCompMap,              # one component, multi-frequency
     MultiFreqTotalMap,             # sum of components, multi-frequency
     SUPPORTED_HEALPIX_ORDERINGS,
@@ -210,6 +212,55 @@ Extra properties and methods:
 - `select_freq(freq_ghz, *, atol=0.0)` — total map narrowed to one frequency;
 - `copy_with(components=..., ...)` — replacing `components` without supplying
   `maps` recomputes the sum.
+
+## `MultiFreqCompAlm`
+
+Harmonic-space sibling to `MultiFreqCompMap`. Returned by
+`gaussky.component.component_utils.sample_component_alm(...)` for callers
+who want to apply custom transfer functions or convert to a pixel map at
+their own `nside`.
+
+Field set:
+
+- `alms`: read-only `complex128` array with shape `(nfreq, nharm, nalm)`,
+  where `nalm = healpy.Alm.getsize(lmax, mmax)`.
+- `lmax`, `mmax` (defaults to `lmax`): band-limits used for the harmonic
+  transform.
+- `freqs_ghz`: positive 1-D `float64`, read-only.
+- `fields`: tuple of harmonic fields (`"T"`, `"E"`, `"B"`) in the caller's
+  requested order.
+- `unit`: signal-map unit string (the alms carry the same units as the
+  corresponding pixel map).
+- `beam_fwhm_rad`: stored for provenance only — the alm path does **not**
+  apply beam smoothing. Combine with `healpy.gauss_beam` or your own `bl`
+  downstream.
+- `coord`, `component_name`, `metadata`: same role as on
+  `MultiFreqCompMap`.
+
+```python
+import healpy as hp
+from gaussky.component.component_utils import sample_component_alm
+from gaussky.ps import CMBCl
+
+alm = sample_component_alm(
+    ps=CMBCl(),
+    sed=None,
+    component_name="cmb",
+    metadata={"r_tensor": 0.0},
+    lmax=64,
+    fields=("T", "E", "B"),
+    freqs_ghz=[90.0, 150.0],
+    seed=42,
+)
+alm.alms.shape       # (2, 3, 2145)  — nalm = (lmax+1)*(lmax+2)/2 for mmax==lmax
+alm.alms.dtype       # complex128 (read-only)
+
+# Convert one channel back to a pixel map at any nside:
+T_map = hp.alm2map(alm.alms[0, 0], nside=64)
+```
+
+`copy_with(**changes)` returns a revalidated copy, the same contract as the
+signal containers.
 
 ## `HealpixMapContainer` / `SignalMapContainer` protocols
 

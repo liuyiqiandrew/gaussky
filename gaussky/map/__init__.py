@@ -1,5 +1,6 @@
 """Map containers for Gaussian sky realizations."""
 
+from .almmap import MultiFreqCompAlm
 from .base import (
     AuxiliaryHealpixMap,
     BaseHealpixMap,
@@ -21,6 +22,7 @@ __all__ = [
     "BeamFwhm",
     "HealpixOrdering",
     "HealpixMapContainer",
+    "MultiFreqCompAlm",
     "MultiFreqCompMap",
     "MultiFreqTotalMap",
     "SignalField",

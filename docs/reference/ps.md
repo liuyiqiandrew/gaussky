@@ -31,8 +31,12 @@ Implementations must return six `float64` arrays of length `lmax + 1` ordered
 as `TT, EE, BB, TE, EB, TB` — the polarized ordering expected by
 `healpy.synfast(..., pol=True, new=True)`.
 
-`unit` is the unit of the returned `C_ell` values. The sampling helpers
-currently require `"uK_CMB^2"`. Anything else raises a clear `ValueError`.
+`unit` is the unit of the returned `C_ell` values. The sampling pipeline
+translates the power-spectrum unit to a signal-map unit through the
+registry in [`gaussky.units`](../conventions.md#units); the bundled mapping
+is `"uK_CMB^2" → "uK_CMB"`. Register additional pairs with
+`gaussky.units.register_signal_unit(power_unit, signal_unit)` before
+sampling with a custom spectrum unit.
 
 ## `validate_healpy_cls(healpy_cls, lmax, *, atol=0.0)`
 
@@ -161,13 +165,17 @@ exactly to zero.
 | `a_lens`       | `1.0`                   | Lensing-template amplitude. `1` returns the template.         |
 | `r_tensor`     | `0.0`                   | Tensor-to-scalar ratio.                                       |
 | `template_dir` | `DEFAULT_CMB_SPEC_DIR`  | Directory containing the two CAMB files.                      |
-| `unit`         | `"uK_CMB^2"`            | Only `uK_CMB^2` is currently supported.                       |
+
+`CMBCl.unit` is a class-level `ClassVar` fixed at `"uK_CMB^2"` — not a
+constructor argument. Passing `unit=...` to the constructor raises
+`TypeError`.
 
 ### Caching
 
-`_load_cmb_templates(template_dir)` is `@lru_cache`-d on the directory string.
-**Changes to template files require restarting the Python process** for the new
-files to be picked up.
+`_load_cmb_templates(template_dir)` is `@lru_cache`-d on `(template_dir,
+no_tensor_mtime_ns, r1_mtime_ns)`. Editing a template file changes its mtime
+and therefore the cache key, so the next load picks up the new contents
+automatically — no Python restart required.
 
 ### Examples
 

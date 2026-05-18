@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import gaussky.component as component
-from gaussky.component import cmb, component_utils, dust, synchrotron
+from gaussky.component import base, cmb, component_utils, dust, synchrotron
 from gaussky.component.cmb import GaussianCMB
 from gaussky.component.dust import SimpleModifiedBlackbodyDust
 from gaussky.component.synchrotron import SimplePowerLawSynchrotron
@@ -93,13 +93,21 @@ def _patch_healpy(monkeypatch):
 
 
 def test_component_package_exports_flat_public_api():
+    from gaussky.component import BaseSEDBackedComponent
+    from gaussky.component.sed_backed import (
+        BaseSEDBackedComponent as _BaseSEDBackedComponent,
+    )
+
     assert component.GaussianCMB is GaussianCMB
     assert component.GaussianCMB is cmb.GaussianCMB
-    assert component.GaussianComponent is synchrotron.GaussianComponent
+    assert component.GaussianComponent is base.GaussianComponent
     assert component.SimplePowerLawSynchrotron is SimplePowerLawSynchrotron
+    assert component.SimplePowerLawSynchrotron is synchrotron.SimplePowerLawSynchrotron
     assert component.SimpleModifiedBlackbodyDust is SimpleModifiedBlackbodyDust
     assert component.SimpleModifiedBlackbodyDust is dust.SimpleModifiedBlackbodyDust
+    assert BaseSEDBackedComponent is _BaseSEDBackedComponent
     assert component.__all__ == [
+        "BaseSEDBackedComponent",
         "GaussianCMB",
         "GaussianComponent",
         "SimpleModifiedBlackbodyDust",
@@ -397,3 +405,154 @@ def test_component_rejects_invalid_seed(monkeypatch):
         sampler.sample_map(nside=1, fields=("T",), seed=-1)
     with pytest.raises(ValueError, match="seed"):
         sampler.sample_map(nside=1, fields=("T",), seed=2**32)
+
+
+def test_lmax_override_changes_realization(monkeypatch):
+    """A lower ``lmax`` band-limits the synfast call and changes the result.
+
+    Verified by patching the helper's healpy stand-in to capture the spectrum
+    length passed to ``synfast``.
+    """
+    fake = _patch_healpy(monkeypatch)
+    sampler = _synchrotron_component()
+
+    sampler.sample_map(nside=4, fields=("T",), freqs_ghz=[30.0])
+    default_lmax = len(fake.synfast_calls[0]["cls"][0]) - 1
+    assert default_lmax == 3 * 4 - 1  # 11
+
+    sampler.sample_map(nside=4, fields=("T",), freqs_ghz=[30.0], lmax=4)
+    override_lmax = len(fake.synfast_calls[1]["cls"][0]) - 1
+    assert override_lmax == 4
+
+
+# --- sample_component_alm ----------------------------------------------------
+#
+# The alm path uses real healpy because the call cost at small lmax (lmax=8 →
+# nalm=45) is negligible and exercising the genuine synalm contract is more
+# valuable than mocking it.
+
+
+def _alm_helper_kwargs(**extras):
+    """Default kwargs for sample_component_alm in the alm tests."""
+    from gaussky.ps import PowerLawCl
+
+    kwargs = dict(
+        ps=PowerLawCl(amp_tt=1.0, amp_ee=1.0, amp_bb=1.0),
+        sed=None,
+        component_name="cmb",
+        metadata={},
+        lmax=8,
+        fields=("T", "E", "B"),
+        freqs_ghz=np.array([30.0, 90.0]),
+        seed=42,
+    )
+    kwargs.update(extras)
+    return kwargs
+
+
+def test_sample_component_alm_returns_validated_container():
+    """The alm container has the expected shape and metadata."""
+    from gaussky.component.component_utils import sample_component_alm
+    from gaussky.map import MultiFreqCompAlm
+
+    alm = sample_component_alm(**_alm_helper_kwargs())
+    assert isinstance(alm, MultiFreqCompAlm)
+    assert alm.alms.shape == (2, 3, 45)  # nalm = (8+1)*(8+2)/2
+    assert alm.lmax == 8
+    assert alm.fields == ("T", "E", "B")
+    assert alm.unit == "uK_CMB"
+    np.testing.assert_allclose(alm.freqs_ghz, [30.0, 90.0])
+    assert alm.metadata["seed"] == 42
+
+
+def test_sample_component_alm_seed_reproducibility():
+    """Two calls with the same seed produce bitwise-identical alms."""
+    from gaussky.component.component_utils import sample_component_alm
+
+    alm_a = sample_component_alm(**_alm_helper_kwargs(seed=7))
+    alm_b = sample_component_alm(**_alm_helper_kwargs(seed=7))
+    alm_c = sample_component_alm(**_alm_helper_kwargs(seed=11))
+    assert np.array_equal(alm_a.alms, alm_b.alms)
+    assert not np.array_equal(alm_a.alms, alm_c.alms)
+
+
+def test_sample_component_alm_broadcasts_across_freq_when_no_sed():
+    """Without an SED, every frequency channel holds the same pivot alm."""
+    from gaussky.component.component_utils import sample_component_alm
+
+    alm = sample_component_alm(**_alm_helper_kwargs())
+    assert np.array_equal(alm.alms[0], alm.alms[1])
+
+
+def test_sample_component_alm_applies_sed_scaling_per_channel():
+    """An SED multiplies the pivot alm by ``sed.scale(freq)`` per channel."""
+    from gaussky.component.component_utils import sample_component_alm
+    from gaussky.ps import PowerLawCl
+    from gaussky.sed import PowerLawSED
+
+    sed = PowerLawSED(beta=-3.0, nu0_ghz=23.0)
+    alm = sample_component_alm(
+        ps=PowerLawCl(amp_ee=1.0, amp_bb=1.0),
+        sed=sed,
+        component_name="sync",
+        metadata={},
+        lmax=4,
+        fields=("E", "B"),
+        freqs_ghz=np.array([23.0, 90.0]),
+        seed=3,
+    )
+    ratio = sed.scale(90.0) / sed.scale(23.0)
+    np.testing.assert_allclose(alm.alms[1], ratio * alm.alms[0])
+
+
+def test_sample_component_alm_respects_field_order_override():
+    """The harmonic-field order in the container mirrors the caller's request."""
+    from gaussky.component.component_utils import sample_component_alm
+
+    alm = sample_component_alm(**_alm_helper_kwargs(fields=("B", "T")))
+    assert alm.fields == ("B", "T")
+    assert alm.alms.shape == (2, 2, 45)
+
+
+def test_sample_component_alm_rejects_invalid_lmax():
+    """A negative ``lmax`` is rejected before any healpy call."""
+    from gaussky.component.component_utils import sample_component_alm
+
+    with pytest.raises(ValueError, match="lmax"):
+        sample_component_alm(**_alm_helper_kwargs(lmax=-1))
+
+
+def test_sample_component_alm_defaults_freqs_to_sed_pivot():
+    """``freqs_ghz=None`` falls back to the SED's pivot when present."""
+    from gaussky.component.component_utils import sample_component_alm
+    from gaussky.ps import PowerLawCl
+    from gaussky.sed import PowerLawSED
+
+    alm = sample_component_alm(
+        ps=PowerLawCl(amp_ee=1.0, amp_bb=1.0),
+        sed=PowerLawSED(beta=-3.0, nu0_ghz=23.0),
+        component_name="sync",
+        metadata={},
+        lmax=4,
+        fields=("E", "B"),
+        freqs_ghz=None,
+    )
+    np.testing.assert_allclose(alm.freqs_ghz, [23.0])
+    assert alm.alms.shape == (1, 2, 15)
+
+
+def test_sample_component_alm_requires_freqs_when_sed_is_none():
+    """Frequency-independent helper still needs ``freqs_ghz`` (no pivot)."""
+    from gaussky.component.component_utils import sample_component_alm
+    from gaussky.ps import PowerLawCl
+
+    with pytest.raises(ValueError, match="freqs_ghz"):
+        sample_component_alm(
+            ps=PowerLawCl(amp_tt=1.0, amp_ee=1.0, amp_bb=1.0),
+            sed=None,
+            component_name="cmb",
+            metadata={},
+            lmax=4,
+            fields=("T",),
+            freqs_ghz=None,
+        )

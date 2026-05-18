@@ -1,4 +1,4 @@
-"""CMB component implementations."""
+"""Frequency-independent Gaussian CMB component backed by lensing templates."""
 
 from __future__ import annotations
 
@@ -10,11 +10,8 @@ from gaussky.conventions import HealpixOrdering, SignalField
 from gaussky.map import BeamFwhm, MultiFreqCompMap
 from gaussky.ps import CMBCl
 
-from .base import GaussianComponent
-from .component_utils import (
-    sample_frequency_independent_gaussian_component_map,
-    validate_component_name,
-)
+from ..base import GaussianComponent
+from ..component_utils import sample_component_map, validate_component_name
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -51,6 +48,7 @@ class GaussianCMB(GaussianComponent):
         ordering: HealpixOrdering = "RING",
         coord: str | None = None,
         seed: int | None = None,
+        lmax: int | None = None,
     ) -> MultiFreqCompMap:
         """Sample a multi-frequency CMB map realization.
 
@@ -80,8 +78,9 @@ class GaussianCMB(GaussianComponent):
         MultiFreqCompMap
             Component map with shape ``(nfreq, nfield, npix)``.
         """
-        return sample_frequency_independent_gaussian_component_map(
+        return sample_component_map(
             ps=self.ps,
+            sed=None,
             component_name=self.name,
             metadata={
                 "a_lens": self.ps.a_lens,
@@ -95,6 +94,7 @@ class GaussianCMB(GaussianComponent):
             ordering=ordering,
             coord=coord,
             seed=seed,
+            lmax=lmax,
         )
 
 

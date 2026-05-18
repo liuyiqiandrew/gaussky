@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Final
+from typing import ClassVar, Final
 
 import numpy as np
 from numpy.typing import NDArray
@@ -96,8 +96,15 @@ def _read_camb_dl_template(path: Path) -> NDArray[np.float64]:
 
 
 @lru_cache(maxsize=None)
-def _load_cmb_templates(template_dir: str) -> _CMBTemplateSet:
-    """Load and cache the CMB template pair from one directory."""
+def _load_cmb_templates_keyed(
+    template_dir: str, _no_tensor_mtime_ns: int, _r1_mtime_ns: int
+) -> _CMBTemplateSet:
+    """Load and cache the CMB template pair, keyed on file mtimes.
+
+    The ``_*_mtime_ns`` arguments are part of the cache key only; they ensure
+    that editing a template file invalidates the cached templates instead of
+    silently returning stale data.
+    """
     source_dir = Path(template_dir)
     lensed_no_tensor = _read_camb_dl_template(source_dir / _LENSED_NO_TENSOR_FILENAME)
     lensed_r1 = _read_camb_dl_template(source_dir / _LENSED_R1_FILENAME)
@@ -111,6 +118,14 @@ def _load_cmb_templates(template_dir: str) -> _CMBTemplateSet:
         lensed_r1_dl=lensed_r1,
         source_dir=source_dir,
     )
+
+
+def _load_cmb_templates(template_dir: str) -> _CMBTemplateSet:
+    """Load CMB templates with mtime-aware caching."""
+    source_dir = Path(template_dir)
+    no_tensor_mtime_ns = (source_dir / _LENSED_NO_TENSOR_FILENAME).stat().st_mtime_ns
+    r1_mtime_ns = (source_dir / _LENSED_R1_FILENAME).stat().st_mtime_ns
+    return _load_cmb_templates_keyed(template_dir, no_tensor_mtime_ns, r1_mtime_ns)
 
 
 def _dl_to_cl_scale(lmax: int) -> NDArray[np.float64]:
@@ -144,20 +159,22 @@ class CMBCl(AngularPowerSpectrum):
         and no-tensor templates.
     template_dir : str or Path, default=DEFAULT_CMB_SPEC_DIR
         Directory containing ``camb_lens_nobb.dat`` and ``camb_lens_r1.dat``.
-    unit : str, default="uK_CMB^2"
-        Unit of the returned ``C_ell`` values.
+
+    Notes
+    -----
+    The unit is fixed to ``"uK_CMB^2"``; CAMB templates are not retabulated
+    in other unit systems by this class.
 
     Raises
     ------
     ValueError
-        If scalar parameters are non-finite, negative, or if ``unit`` is not
-        supported.
+        If scalar parameters are non-finite or negative.
     """
 
     a_lens: float = 1.0
     r_tensor: float = 0.0
     template_dir: str | Path = DEFAULT_CMB_SPEC_DIR
-    unit: str = U_K_CMB_SQUARED
+    unit: ClassVar[str] = U_K_CMB_SQUARED
 
     def __post_init__(self) -> None:
         """Validate scalar CMB spectrum parameters."""
@@ -165,8 +182,6 @@ class CMBCl(AngularPowerSpectrum):
             raise ValueError("a_lens must be finite and non-negative")
         if not np.isfinite(self.r_tensor) or self.r_tensor < 0.0:
             raise ValueError("r_tensor must be finite and non-negative")
-        if self.unit != U_K_CMB_SQUARED:
-            raise ValueError(f"CMBCl only supports unit {U_K_CMB_SQUARED!r}")
 
     def to_healpy_cls(self, lmax: int) -> list[NDArray[np.float64]]:
         """Return CMB ``C_ell`` spectra through ``lmax``.

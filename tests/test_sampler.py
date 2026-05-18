@@ -22,6 +22,7 @@ class FakeComponent:
         ordering="RING",
         coord=None,
         seed=None,
+        lmax=None,
     ):
         freqs = np.asarray(
             [self.default_freq] if freqs_ghz is None else freqs_ghz,
@@ -42,6 +43,7 @@ class FakeComponent:
                 "ordering": ordering,
                 "coord": coord,
                 "seed": seed,
+                "lmax": lmax,
             }
         )
         return MultiFreqCompMap(
@@ -171,3 +173,101 @@ def test_sampler_rejects_invalid_or_duplicate_component_seeds():
         sampler.sample(FakeComponent("sync", 1.0), seed=2**32)
     with pytest.raises(ValueError, match="unique"):
         sampler.sample([FakeComponent("sync", 1.0), FakeComponent("sync", 2.0)])
+
+
+# --- Sampler per-scene defaults (A5) + lmax (A6) ----------------------------
+
+
+def test_sampler_stores_per_scene_defaults_and_forwards_them():
+    """Constructor defaults flow into ``component.sample_map`` when not overridden."""
+    component = FakeComponent("sync", 1.0)
+    sampler = Sampler(
+        nside=1,
+        fields=("T", "Q"),
+        freqs_ghz=[30.0, 90.0],
+        beam_fwhm_rad=0.05,
+        coord="G",
+        ordering="NESTED",
+        seed=42,
+        lmax=5,
+    )
+
+    sampler.sample(component)
+
+    call = component.sample_calls[0]
+    assert call["fields"] == ("T", "Q")
+    np.testing.assert_allclose(call["freqs_ghz"], [30.0, 90.0])
+    assert call["beam_fwhm_rad"] == 0.05
+    assert call["coord"] == "G"
+    assert call["ordering"] == "NESTED"
+    assert call["seed"] == 42
+    assert call["lmax"] == 5
+
+
+def test_sampler_per_call_override_beats_stored_default():
+    """An explicit kwarg on ``sample`` overrides the matching stored default."""
+    component = FakeComponent("sync", 1.0)
+    sampler = Sampler(
+        nside=1,
+        fields=("T", "Q"),
+        freqs_ghz=[30.0],
+        beam_fwhm_rad=0.05,
+        seed=1,
+        lmax=5,
+    )
+
+    sampler.sample(
+        component,
+        fields=("U",),
+        freqs_ghz=[90.0],
+        beam_fwhm_rad=0.1,
+        seed=99,
+        lmax=8,
+    )
+
+    call = component.sample_calls[0]
+    assert call["fields"] == ("U",)
+    np.testing.assert_allclose(call["freqs_ghz"], [90.0])
+    assert call["beam_fwhm_rad"] == 0.1
+    assert call["seed"] == 99
+    assert call["lmax"] == 8
+
+
+def test_sampler_explicit_none_overrides_non_none_default():
+    """The ``_Unset`` sentinel makes explicit ``None`` a real override."""
+    component = FakeComponent("sync", 1.0, default_freq=42.0)
+    sampler = Sampler(nside=1, freqs_ghz=[30.0], coord="G")
+
+    sampler.sample(component, freqs_ghz=None, coord=None)
+
+    call = component.sample_calls[0]
+    # FakeComponent falls back to default_freq when freqs_ghz=None reaches it
+    assert call["raw_freqs_ghz"] is None
+    assert call["coord"] is None
+
+
+def test_sampler_with_returns_new_instance_with_replaced_defaults():
+    """``with_`` produces a sibling sampler without mutating the original."""
+    original = Sampler(nside=1, seed=1, beam_fwhm_rad=0.05)
+    updated = original.with_(seed=42, beam_fwhm_rad=0.1)
+
+    assert original.seed == 1
+    assert original.beam_fwhm_rad == 0.05
+    assert updated.seed == 42
+    assert updated.beam_fwhm_rad == 0.1
+    assert updated.nside == original.nside
+
+
+def test_sampler_with_rejects_unknown_keys():
+    """Typos surface as ``TypeError`` rather than silently being ignored."""
+    sampler = Sampler(nside=1)
+    with pytest.raises(TypeError, match="Unknown Sampler default"):
+        sampler.with_(bogus=1)
+
+
+def test_sampler_reproducibility_with_seed_default():
+    """Two samples from one sampler with a fixed seed produce identical maps."""
+    sampler = Sampler(nside=1, freqs_ghz=[30.0], seed=2025)
+    a = sampler.sample(FakeComponent("sync", 1.0))
+    b = sampler.sample(FakeComponent("sync", 1.0))
+    np.testing.assert_array_equal(a.maps, b.maps)
