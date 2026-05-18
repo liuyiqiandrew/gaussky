@@ -123,7 +123,7 @@ class BaseHealpixMap(HealpixMapContainer):
     ------
     ValueError
         If the map is missing a trailing pixel axis or the trailing axis does
-        not match ``12 * nside**2``.
+        not match ``healpy.nside2npix(nside)``.
     TypeError
         If ``nside``, ``ordering``, or ``coord`` have unsupported types.
     """

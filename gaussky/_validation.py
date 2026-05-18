@@ -16,6 +16,7 @@ from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import TypeAlias, cast
 
+import healpy as hp  # type: ignore[import-not-found]
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
@@ -62,8 +63,8 @@ def validate_lmax(lmax: int) -> None:
 
 
 def expected_npix(nside: int) -> int:
-    """Return the HEALPix pixel count for ``nside``."""
-    return 12 * nside**2
+    """Return the HEALPix pixel count for ``nside`` via :func:`healpy.nside2npix`."""
+    return int(hp.nside2npix(nside))
 
 
 def readonly_float_array(values: object, name: str) -> NDArray[np.float64]:
