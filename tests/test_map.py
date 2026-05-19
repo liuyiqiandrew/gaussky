@@ -290,3 +290,64 @@ def test_total_map_rejects_duplicate_incompatible_or_inconsistent_components():
             coord=sync.coord,
             components=(sync, dust),
         )
+
+
+# --- C2: fast from_components -----------------------------------------------
+
+
+def test_total_map_from_components_is_equivalent_to_bare_constructor():
+    """The fast classmethod produces a map equivalent to the validating path."""
+    sync = _component(name="sync", maps=np.ones((2, 2, _npix())))
+    dust = _component(name="dust", maps=2.0 * np.ones((2, 2, _npix())))
+
+    fast = MultiFreqTotalMap.from_components((sync, dust))
+    slow = MultiFreqTotalMap(
+        freqs_ghz=sync.freqs_ghz,
+        fields=sync.fields,
+        unit=sync.unit,
+        maps=sync.maps + dust.maps,
+        nside=sync.nside,
+        beam_fwhm_rad=sync.beam_fwhm_rad,
+        ordering=sync.ordering,
+        coord=sync.coord,
+        components=(sync, dust),
+    )
+
+    np.testing.assert_array_equal(fast.maps, slow.maps)
+    assert fast.component_names == slow.component_names
+    assert fast.nside == slow.nside
+    assert fast.ordering == slow.ordering
+    assert fast.coord == slow.coord
+    assert fast.unit == slow.unit
+    assert fast.fields == slow.fields
+    np.testing.assert_array_equal(fast.freqs_ghz, slow.freqs_ghz)
+    assert not fast.maps.flags.writeable
+
+
+def test_total_map_from_components_metadata_is_read_only():
+    """The fast path still wraps metadata in a read-only mapping."""
+    sync = _component(name="sync", maps=np.ones((2, 2, _npix())))
+    dust = _component(name="dust", maps=2.0 * np.ones((2, 2, _npix())))
+
+    total = MultiFreqTotalMap.from_components((sync, dust), metadata={"seed": 7})
+    assert total.metadata == {"seed": 7}
+    with pytest.raises(TypeError):
+        total.metadata["new"] = "value"
+
+
+# --- D3: __repr__ discipline ------------------------------------------------
+
+
+def test_repr_omits_array_bodies_on_map_containers():
+    """Map containers stringify with shape and metadata, not array contents."""
+    auxiliary = _auxiliary(unit="dimensionless")
+    component = _component(name="sync")
+    sync = _component(name="sync", maps=np.ones((2, 2, _npix())))
+    dust = _component(name="dust", maps=2.0 * np.ones((2, 2, _npix())))
+    total = MultiFreqTotalMap.from_components((sync, dust))
+
+    for container in (auxiliary, component, total):
+        text = repr(container)
+        assert len(text) <= 300
+        assert "array(" not in text
+        assert type(container).__name__ in text

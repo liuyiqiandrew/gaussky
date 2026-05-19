@@ -208,6 +208,17 @@ class BaseHealpixMap(HealpixMapContainer):
             raise ValueError(f"Unknown map field replacement(s): {names}")
         return replace(self, **cast(Any, changes))
 
+    def __repr__(self) -> str:
+        """Return a short representation that omits the array body."""
+        return (
+            f"{type(self).__name__}("
+            f"shape={self.maps.shape}, "
+            f"dtype={self.maps.dtype}, "
+            f"nside={self.nside}, "
+            f"ordering={self.ordering!r}, "
+            f"coord={self.coord!r})"
+        )
+
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class AuxiliaryHealpixMap(BaseHealpixMap):
@@ -233,6 +244,18 @@ class AuxiliaryHealpixMap(BaseHealpixMap):
             if self.unit == "":
                 raise ValueError("unit must not be empty")
         object.__setattr__(self, "metadata", _normalize_metadata(self.metadata))
+
+    def __repr__(self) -> str:
+        """Return a short representation that omits the array body."""
+        return (
+            f"{type(self).__name__}("
+            f"shape={self.maps.shape}, "
+            f"dtype={self.maps.dtype}, "
+            f"unit={self.unit!r}, "
+            f"nside={self.nside}, "
+            f"ordering={self.ordering!r}, "
+            f"coord={self.coord!r})"
+        )
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -407,3 +430,16 @@ class BaseSignalMap(BaseHealpixMap, SignalMapContainer):
                 raise ValueError("beam FWHM values are incompatible")
         elif not _arrays_close(self_beam, other_beam, rtol=rtol, atol=atol):
             raise ValueError("beam FWHM values are incompatible")
+
+    def __repr__(self) -> str:
+        """Return a short representation that omits the map array body."""
+        return (
+            f"{type(self).__name__}("
+            f"shape={self.maps.shape}, "
+            f"freqs_ghz={self.freqs_ghz.tolist()}, "
+            f"fields={self.fields}, "
+            f"unit={self.unit!r}, "
+            f"nside={self.nside}, "
+            f"ordering={self.ordering!r}, "
+            f"coord={self.coord!r})"
+        )

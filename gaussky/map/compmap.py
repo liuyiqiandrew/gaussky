@@ -82,6 +82,20 @@ class MultiFreqCompMap(BaseSignalMap):
         )
         object.__setattr__(self, "metadata", normalize_metadata(self.metadata))
 
+    def __repr__(self) -> str:
+        """Return a short representation that omits the map array body."""
+        return (
+            f"{type(self).__name__}("
+            f"component_name={self.component_name!r}, "
+            f"shape={self.maps.shape}, "
+            f"freqs_ghz={self.freqs_ghz.tolist()}, "
+            f"fields={self.fields}, "
+            f"unit={self.unit!r}, "
+            f"nside={self.nside}, "
+            f"ordering={self.ordering!r}, "
+            f"coord={self.coord!r})"
+        )
+
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class MultiFreqTotalMap(BaseSignalMap):
@@ -127,6 +141,20 @@ class MultiFreqTotalMap(BaseSignalMap):
         object.__setattr__(self, "components", components)
         object.__setattr__(self, "metadata", normalize_metadata(self.metadata))
 
+    def __repr__(self) -> str:
+        """Return a short representation that omits the map array body."""
+        return (
+            f"{type(self).__name__}("
+            f"component_names={self.component_names}, "
+            f"shape={self.maps.shape}, "
+            f"freqs_ghz={self.freqs_ghz.tolist()}, "
+            f"fields={self.fields}, "
+            f"unit={self.unit!r}, "
+            f"nside={self.nside}, "
+            f"ordering={self.ordering!r}, "
+            f"coord={self.coord!r})"
+        )
+
     @classmethod
     def from_components(
         cls,
@@ -148,6 +176,15 @@ class MultiFreqTotalMap(BaseSignalMap):
         -------
         MultiFreqTotalMap
             Total map whose ``maps`` array is the component sum.
+
+        Notes
+        -----
+        Unlike the bare constructor, this classmethod skips the redundant
+        per-call resum-and-compare and the read-only-array re-copy: the sum
+        is *built* from the components in this method, so re-validating it
+        against the input would be wasted work for large
+        ``nfreq * nfield * npix``. The cheap structural checks
+        (``assert_compatible`` and the unique-name check) still run.
         """
         component_tuple = tuple(components)
         if not component_tuple:
@@ -161,18 +198,25 @@ class MultiFreqTotalMap(BaseSignalMap):
         for component in component_tuple[1:]:
             reference.assert_compatible(component)
 
-        return cls(
-            freqs_ghz=reference.freqs_ghz,
-            fields=reference.fields,
-            unit=reference.unit,
-            maps=_sum_component_maps(component_tuple),
-            nside=reference.nside,
-            beam_fwhm_rad=reference.beam_fwhm_rad,
-            ordering=reference.ordering,
-            coord=reference.coord,
-            components=component_tuple,
-            metadata={} if metadata is None else metadata,
+        summed_maps = _sum_component_maps(component_tuple)
+        summed_maps.setflags(write=False)
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "maps", summed_maps)
+        object.__setattr__(instance, "nside", reference.nside)
+        object.__setattr__(instance, "ordering", reference.ordering)
+        object.__setattr__(instance, "coord", reference.coord)
+        object.__setattr__(instance, "freqs_ghz", reference.freqs_ghz)
+        object.__setattr__(instance, "fields", reference.fields)
+        object.__setattr__(instance, "unit", reference.unit)
+        object.__setattr__(instance, "beam_fwhm_rad", reference.beam_fwhm_rad)
+        object.__setattr__(instance, "components", component_tuple)
+        object.__setattr__(
+            instance,
+            "metadata",
+            normalize_metadata({} if metadata is None else metadata),
         )
+        return instance
 
     @property
     def component_names(self) -> tuple[str, ...]:

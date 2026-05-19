@@ -169,5 +169,19 @@ class MultiFreqCompAlm:
             raise ValueError(f"Unknown alm-container field replacement(s): {names}")
         return replace(self, **cast(Any, changes))
 
+    def __repr__(self) -> str:
+        """Return a short representation that omits the alm array body."""
+        return (
+            f"{type(self).__name__}("
+            f"component_name={self.component_name!r}, "
+            f"shape={self.alms.shape}, "
+            f"lmax={self.lmax}, "
+            f"mmax={self.mmax}, "
+            f"freqs_ghz={self.freqs_ghz.tolist()}, "
+            f"fields={self.fields}, "
+            f"unit={self.unit!r}, "
+            f"coord={self.coord!r})"
+        )
+
 
 __all__ = ["MultiFreqCompAlm"]

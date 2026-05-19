@@ -123,3 +123,13 @@ def test_alm_container_supports_per_frequency_beam_provenance() -> None:
     alm = _alm_container(beam_fwhm_rad=np.array([0.01, 0.02]))
     assert alm.beam_fwhm_rad is not None
     np.testing.assert_allclose(alm.beam_fwhm_rad, [0.01, 0.02])
+
+
+def test_alm_container_repr_omits_array_body() -> None:
+    """``repr`` returns a short summary that does not include the alms."""
+    alm = _alm_container()
+    text = repr(alm)
+    assert len(text) <= 300
+    assert "array(" not in text
+    assert "MultiFreqCompAlm" in text
+    assert "lmax=4" in text
