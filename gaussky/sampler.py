@@ -8,13 +8,13 @@ from typing import Any, ClassVar, Final, overload
 import numpy as np
 from numpy.typing import ArrayLike
 
-from gaussky.component.base import GaussianComponent
+from gaussky.component.base import GaussianComponent, NoiseComponent
 from gaussky.component.component_utils import normalize_seed
 from gaussky.conventions import HealpixOrdering, SignalField
 from gaussky.map import BeamFwhm, MultiFreqCompMap, MultiFreqTotalMap
 
 
-_CHILD_SEED_HIGH: Final[int] = 2**32 - 1
+_AnyComponent = GaussianComponent | NoiseComponent
 
 
 class _Unset:
@@ -118,7 +118,21 @@ class Sampler:
     @overload
     def sample(
         self,
-        comp: Sequence[GaussianComponent],
+        comp: NoiseComponent,
+        *,
+        fields: tuple[SignalField, ...] | _Unset = _UNSET,
+        freqs_ghz: ArrayLike | None | _Unset = _UNSET,
+        beam_fwhm_rad: BeamFwhm | _Unset = _UNSET,
+        coord: str | None | _Unset = _UNSET,
+        ordering: HealpixOrdering | _Unset = _UNSET,
+        seed: int | None | _Unset = _UNSET,
+        lmax: int | None | _Unset = _UNSET,
+    ) -> MultiFreqCompMap: ...
+
+    @overload
+    def sample(
+        self,
+        comp: Sequence[_AnyComponent],
         *,
         fields: tuple[SignalField, ...] | _Unset = _UNSET,
         freqs_ghz: ArrayLike | None | _Unset = _UNSET,
@@ -131,7 +145,7 @@ class Sampler:
 
     def sample(
         self,
-        comp: GaussianComponent | Sequence[GaussianComponent],
+        comp: _AnyComponent | Sequence[_AnyComponent],
         *,
         fields: tuple[SignalField, ...] | _Unset = _UNSET,
         freqs_ghz: ArrayLike | None | _Unset = _UNSET,
@@ -146,6 +160,13 @@ class Sampler:
         Each keyword argument falls back to the corresponding default
         captured at construction time when omitted; pass an explicit value
         (including ``None`` for nullable arguments) to override.
+
+        ``NoiseComponent`` instances are dispatched to
+        :meth:`NoiseComponent.sample_noise_map` and are *not* beam-smoothed;
+        ``GaussianComponent`` instances go through
+        :meth:`GaussianComponent.sample_map`. A mixed sequence is permitted
+        and routed element-by-element before the per-component maps are
+        summed into a :class:`MultiFreqTotalMap`.
         """
         resolved_fields = self.fields if isinstance(fields, _Unset) else fields
         resolved_freqs = self.freqs_ghz if isinstance(freqs_ghz, _Unset) else freqs_ghz
@@ -158,49 +179,92 @@ class Sampler:
         resolved_lmax = self.lmax if isinstance(lmax, _Unset) else lmax
         normalized_seed = normalize_seed(resolved_seed)
 
-        if isinstance(comp, GaussianComponent):
-            return self._sample_component(
-                comp,
-                fields=resolved_fields,
-                ordering=resolved_ordering,
-                beam_fwhm_rad=resolved_beam,
-                coord=resolved_coord,
-                freqs_ghz=resolved_freqs,
-                seed=normalized_seed,
-                lmax=resolved_lmax,
-            )
-
-        if isinstance(comp, Sequence):
-            components = self._normalize_components(comp)
-            component_seeds = self._component_seeds(
-                components,
-                root_seed=normalized_seed,
-            )
-
-            component_maps = tuple(
-                self._sample_component(
-                    component,
+        if not isinstance(comp, Sequence) or isinstance(comp, (str, bytes)):
+            if isinstance(comp, NoiseComponent):
+                return self._sample_noise(
+                    comp,
                     fields=resolved_fields,
                     ordering=resolved_ordering,
                     beam_fwhm_rad=resolved_beam,
                     coord=resolved_coord,
                     freqs_ghz=resolved_freqs,
-                    seed=component_seeds[component.name],
+                    seed=normalized_seed,
+                )
+            if isinstance(comp, GaussianComponent):
+                return self._sample_component(
+                    comp,
+                    fields=resolved_fields,
+                    ordering=resolved_ordering,
+                    beam_fwhm_rad=resolved_beam,
+                    coord=resolved_coord,
+                    freqs_ghz=resolved_freqs,
+                    seed=normalized_seed,
                     lmax=resolved_lmax,
                 )
-                for component in components
-            )
-            return MultiFreqTotalMap.from_components(
-                component_maps,
-                metadata={
-                    "seed": normalized_seed,
-                    "component_seeds": component_seeds,
-                },
+            raise TypeError(
+                "comp must be a GaussianComponent, NoiseComponent, or sequence of "
+                "such components"
             )
 
-        raise TypeError(
-            "comp must be a GaussianComponent or a sequence of GaussianComponent "
-            "instances"
+        components = self._normalize_components(comp)
+        component_seeds = self._component_seeds(
+            components,
+            root_seed=normalized_seed,
+        )
+
+        component_maps = tuple(
+            self._sample_any(
+                component,
+                fields=resolved_fields,
+                ordering=resolved_ordering,
+                beam_fwhm_rad=resolved_beam,
+                coord=resolved_coord,
+                freqs_ghz=resolved_freqs,
+                seed=component_seeds[component.name],
+                lmax=resolved_lmax,
+            )
+            for component in components
+        )
+        return MultiFreqTotalMap.from_components(
+            component_maps,
+            metadata={
+                "seed": normalized_seed,
+                "component_seeds": component_seeds,
+            },
+        )
+
+    def _sample_any(
+        self,
+        component: _AnyComponent,
+        *,
+        fields: tuple[SignalField, ...],
+        ordering: HealpixOrdering,
+        beam_fwhm_rad: BeamFwhm,
+        coord: str | None,
+        freqs_ghz: ArrayLike | None,
+        seed: int | None,
+        lmax: int | None,
+    ) -> MultiFreqCompMap:
+        """Dispatch one component by protocol kind (noise vs signal)."""
+        if isinstance(component, NoiseComponent):
+            return self._sample_noise(
+                component,
+                fields=fields,
+                ordering=ordering,
+                beam_fwhm_rad=beam_fwhm_rad,
+                coord=coord,
+                freqs_ghz=freqs_ghz,
+                seed=seed,
+            )
+        return self._sample_component(
+            component,
+            fields=fields,
+            ordering=ordering,
+            beam_fwhm_rad=beam_fwhm_rad,
+            coord=coord,
+            freqs_ghz=freqs_ghz,
+            seed=seed,
+            lmax=lmax,
         )
 
     def _sample_component(
@@ -215,11 +279,10 @@ class Sampler:
         seed: int | None,
         lmax: int | None,
     ) -> MultiFreqCompMap:
-        """Dispatch one component through its ``sample_map`` method."""
+        """Dispatch one signal component through its ``sample_map`` method."""
         if not isinstance(component, GaussianComponent):
             raise TypeError(
-                "components must be GaussianComponent instances with a name "
-                "and sample_map method"
+                "components must be GaussianComponent or NoiseComponent instances"
             )
 
         return component.sample_map(
@@ -233,20 +296,42 @@ class Sampler:
             lmax=lmax,
         )
 
+    def _sample_noise(
+        self,
+        component: NoiseComponent,
+        *,
+        fields: tuple[SignalField, ...],
+        ordering: HealpixOrdering,
+        beam_fwhm_rad: BeamFwhm,
+        coord: str | None,
+        freqs_ghz: ArrayLike | None,
+        seed: int | None,
+    ) -> MultiFreqCompMap:
+        """Dispatch one noise component through ``sample_noise_map``."""
+        return component.sample_noise_map(
+            nside=self.nside,
+            freqs_ghz=freqs_ghz,
+            fields=fields,
+            ordering=ordering,
+            beam_fwhm_rad=beam_fwhm_rad,
+            coord=coord,
+            seed=seed,
+        )
+
     def _normalize_components(
         self,
-        components: Sequence[GaussianComponent],
-    ) -> tuple[GaussianComponent, ...]:
+        components: Sequence[_AnyComponent],
+    ) -> tuple[_AnyComponent, ...]:
         """Validate a non-empty component sequence before sampling."""
         component_tuple = tuple(components)
         if not component_tuple:
             raise ValueError("components must contain at least one component")
 
         for component in component_tuple:
-            if not isinstance(component, GaussianComponent):
+            if not isinstance(component, (GaussianComponent, NoiseComponent)):
                 raise TypeError(
-                    "components must be GaussianComponent instances with a name "
-                    "and sample_map method"
+                    "components must be GaussianComponent or NoiseComponent "
+                    "instances"
                 )
 
         names = [component.name for component in component_tuple]
@@ -256,17 +341,26 @@ class Sampler:
 
     def _component_seeds(
         self,
-        components: tuple[GaussianComponent, ...],
+        components: tuple[_AnyComponent, ...],
         *,
         root_seed: int | None,
     ) -> dict[str, int | None]:
-        """Return per-component seeds derived from an optional root seed."""
+        """Return per-component seeds derived from an optional root seed.
+
+        Uses :class:`numpy.random.SeedSequence` and its ``spawn`` method to
+        derive statistically independent child seeds. Each child seed is a
+        32-bit unsigned integer compatible with the legacy
+        :func:`numpy.random.seed` plumbing used by Healpy's pivot draws and
+        the noise generator.
+        """
         if root_seed is None:
             return {component.name: None for component in components}
 
-        rng = np.random.RandomState(root_seed)
-        child_seeds = rng.randint(0, _CHILD_SEED_HIGH, size=len(components))
+        seed_sequence = np.random.SeedSequence(root_seed)
+        child_sequences = seed_sequence.spawn(len(components))
         return {
-            component.name: int(child_seed)
-            for component, child_seed in zip(components, child_seeds, strict=True)
+            component.name: int(child_sequence.generate_state(1, dtype=np.uint32)[0])
+            for component, child_sequence in zip(
+                components, child_sequences, strict=True
+            )
         }

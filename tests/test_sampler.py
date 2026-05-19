@@ -140,9 +140,11 @@ def test_sampler_derives_component_seeds_from_root_seed():
     sync = FakeComponent("sync", 2.0)
     dust = FakeComponent("dust", 3.0)
     root_seed = 123
-    expected_child_seeds = np.random.RandomState(root_seed).randint(
-        0, 2**32 - 1, size=2
-    )
+    expected_child_sequences = np.random.SeedSequence(root_seed).spawn(2)
+    expected_child_seeds = [
+        int(seq.generate_state(1, dtype=np.uint32)[0])
+        for seq in expected_child_sequences
+    ]
 
     sampled = Sampler(nside=1).sample(
         [sync, dust],
@@ -151,17 +153,17 @@ def test_sampler_derives_component_seeds_from_root_seed():
         seed=root_seed,
     )
 
-    assert sync.sample_calls[0]["seed"] == int(expected_child_seeds[0])
-    assert dust.sample_calls[0]["seed"] == int(expected_child_seeds[1])
+    assert sync.sample_calls[0]["seed"] == expected_child_seeds[0]
+    assert dust.sample_calls[0]["seed"] == expected_child_seeds[1]
     assert sampled.metadata == {
         "seed": root_seed,
         "component_seeds": {
-            "sync": int(expected_child_seeds[0]),
-            "dust": int(expected_child_seeds[1]),
+            "sync": expected_child_seeds[0],
+            "dust": expected_child_seeds[1],
         },
     }
-    assert sampled.component("sync").metadata["seed"] == int(expected_child_seeds[0])
-    assert sampled.component("dust").metadata["seed"] == int(expected_child_seeds[1])
+    assert sampled.component("sync").metadata["seed"] == expected_child_seeds[0]
+    assert sampled.component("dust").metadata["seed"] == expected_child_seeds[1]
 
 
 def test_sampler_rejects_invalid_or_duplicate_component_seeds():
@@ -271,3 +273,57 @@ def test_sampler_reproducibility_with_seed_default():
     a = sampler.sample(FakeComponent("sync", 1.0))
     b = sampler.sample(FakeComponent("sync", 1.0))
     np.testing.assert_array_equal(a.maps, b.maps)
+
+
+# --- D1: SeedSequence-based child seeds -------------------------------------
+
+
+def test_sampler_child_seeds_are_deterministic_for_same_root_seed():
+    """Two sample calls with the same root seed assign identical child seeds."""
+    components_one = [FakeComponent("sync", 1.0), FakeComponent("dust", 2.0)]
+    components_two = [FakeComponent("sync", 1.0), FakeComponent("dust", 2.0)]
+    sampler = Sampler(nside=1, freqs_ghz=[30.0], seed=2026)
+
+    first = sampler.sample(components_one)
+    second = sampler.sample(components_two)
+
+    assert first.metadata["component_seeds"] == second.metadata["component_seeds"]
+
+
+def test_sampler_child_seeds_change_with_root_seed():
+    """A different root seed produces a different per-component seed dict."""
+    sampler = Sampler(nside=1, freqs_ghz=[30.0])
+    one = sampler.sample([FakeComponent("a", 1.0), FakeComponent("b", 2.0)], seed=1)
+    two = sampler.sample([FakeComponent("a", 1.0), FakeComponent("b", 2.0)], seed=2)
+
+    assert one.metadata["component_seeds"] != two.metadata["component_seeds"]
+
+
+def test_sampler_child_seeds_are_pairwise_distinct():
+    """Spawned child seeds within a sample call are distinct."""
+    sampler = Sampler(nside=1, freqs_ghz=[30.0], seed=99)
+    components = [
+        FakeComponent("a", 1.0),
+        FakeComponent("b", 2.0),
+        FakeComponent("c", 3.0),
+        FakeComponent("d", 4.0),
+    ]
+    sampled = sampler.sample(components)
+    seeds = list(sampled.metadata["component_seeds"].values())
+    assert len(set(seeds)) == len(seeds)
+
+
+def test_sampler_child_seed_is_positional_in_spawn_sequence():
+    """``SeedSequence.spawn`` is positional — same index ⇒ same child seed."""
+    sampler = Sampler(nside=1, freqs_ghz=[30.0], seed=7)
+    two = sampler.sample([FakeComponent("a", 1.0), FakeComponent("b", 2.0)])
+    three = sampler.sample(
+        [FakeComponent("a", 1.0), FakeComponent("b", 2.0), FakeComponent("c", 3.0)]
+    )
+
+    assert (
+        two.metadata["component_seeds"]["a"] == three.metadata["component_seeds"]["a"]
+    )
+    assert (
+        two.metadata["component_seeds"]["b"] == three.metadata["component_seeds"]["b"]
+    )

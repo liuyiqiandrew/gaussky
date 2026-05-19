@@ -110,8 +110,10 @@ def test_component_package_exports_flat_public_api():
         "BaseSEDBackedComponent",
         "GaussianCMB",
         "GaussianComponent",
+        "NoiseComponent",
         "SimpleModifiedBlackbodyDust",
         "SimplePowerLawSynchrotron",
+        "WhiteNoise",
     ]
 
 

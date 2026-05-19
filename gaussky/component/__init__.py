@@ -1,14 +1,16 @@
 """Gaussian sky component samplers."""
 
-from .base import GaussianComponent
+from .base import GaussianComponent, NoiseComponent
 from .sed_backed import BaseSEDBackedComponent
 
 __all__ = [
     "BaseSEDBackedComponent",
     "GaussianCMB",
     "GaussianComponent",
+    "NoiseComponent",
     "SimpleModifiedBlackbodyDust",
     "SimplePowerLawSynchrotron",
+    "WhiteNoise",
 ]
 
 
@@ -26,4 +28,8 @@ def __getattr__(name: str):
         from .synchrotron import SimplePowerLawSynchrotron
 
         return SimplePowerLawSynchrotron
+    if name == "WhiteNoise":
+        from .noise import WhiteNoise
+
+        return WhiteNoise
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

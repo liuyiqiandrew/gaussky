@@ -276,6 +276,145 @@ def _normalize_harmonic_fields(
     return normalized
 
 
+def _normalize_sigma_uK_arcmin(
+    sigma_uK_arcmin: float | NDArray[np.float64], nfreq: int
+) -> NDArray[np.float64]:
+    """Validate noise sensitivity and broadcast to ``(nfreq,)``.
+
+    Parameters
+    ----------
+    sigma_uK_arcmin : float or ndarray
+        Noise sensitivity in μK·arcmin. Scalar broadcasts across all
+        channels; a one-dimensional array must have length ``nfreq``.
+    nfreq : int
+        Number of frequency channels.
+
+    Returns
+    -------
+    ndarray
+        One-dimensional ``float64`` array of length ``nfreq`` with strictly
+        positive entries.
+
+    Raises
+    ------
+    ValueError
+        If any entry is non-finite or non-positive, if the input is more
+        than one-dimensional, or if a 1-D input's length does not match
+        ``nfreq``.
+    """
+    sigma = np.asarray(sigma_uK_arcmin, dtype=np.float64)
+    if sigma.ndim == 0:
+        broadcast = np.full(nfreq, float(sigma), dtype=np.float64)
+    elif sigma.ndim == 1:
+        if sigma.size != nfreq:
+            raise ValueError(
+                "sigma_uK_arcmin length must match the number of frequency "
+                f"channels; expected {nfreq}, got {sigma.size}"
+            )
+        broadcast = sigma.astype(np.float64, copy=True)
+    else:
+        raise ValueError("sigma_uK_arcmin must be scalar or one-dimensional")
+
+    if np.any(~np.isfinite(broadcast)) or np.any(broadcast <= 0.0):
+        raise ValueError("sigma_uK_arcmin must contain finite positive values")
+    return broadcast
+
+
+def sample_per_channel_noise_map(
+    *,
+    sigma_uK_arcmin: float | NDArray[np.float64],
+    component_name: str,
+    metadata: Mapping[str, object],
+    nside: int,
+    fields: tuple[SignalField, ...],
+    freqs_ghz: ArrayLike | None,
+    beam_fwhm_rad: BeamFwhm = None,
+    ordering: HealpixOrdering = "RING",
+    coord: str | None = None,
+    seed: int | None = None,
+) -> MultiFreqCompMap:
+    """Draw independent per-channel Gaussian white-noise maps.
+
+    The pixel-space standard deviation of each channel is
+    ``sigma_uK_arcmin / sqrt(pixel_area_arcmin²)`` with
+    ``pixel_area_arcmin² = healpy.nside2pixarea(nside, degrees=True) * 3600``.
+    Independent ``standard_normal`` draws are taken per
+    ``(frequency, field, pixel)`` triple, so the noise is uncorrelated
+    across channels and across T/Q/U.
+
+    ``hp.smoothing`` is **never** called: the beam value flows through
+    only as provenance on the returned :class:`MultiFreqCompMap`. This is
+    the structural enforcement of the
+    ``total = (beam ⊗ sky) + noise`` invariant.
+
+    Parameters
+    ----------
+    sigma_uK_arcmin : float or ndarray
+        Per-channel noise sensitivity in μK·arcmin. Scalar broadcasts
+        across all channels; a 1-D array must match the resolved
+        ``freqs_ghz`` length.
+    component_name : str
+        Component label stored in the returned map.
+    metadata : mapping
+        Model parameters stored in the returned map.
+    nside : int
+        HEALPix resolution parameter.
+    fields : tuple of {"T", "Q", "U"}
+        Signal fields to retain, in output order.
+    freqs_ghz : array_like or None
+        Frequency channels in GHz. Must be supplied for noise components.
+    beam_fwhm_rad : float, ndarray, or None, default=None
+        Instrument beam FWHM in radians, stored for provenance only. The
+        noise map is *not* smoothed by this value.
+    ordering : {"RING", "NESTED"}, default="RING"
+        HEALPix ordering for the returned map.
+    coord : str or None, default=None
+        Optional coordinate-frame label for the returned map.
+    seed : int or None, default=None
+        Optional seed for :func:`numpy.random.default_rng`.
+
+    Returns
+    -------
+    MultiFreqCompMap
+        Component map with shape ``(nfreq, nfield, npix)`` and
+        unit ``"uK_CMB"``.
+    """
+    validate_nside(nside)
+    normalized_ordering = normalize_ordering(ordering)
+    freqs = normalize_freqs(freqs_ghz)
+    normalized_fields = normalize_signal_fields(fields)
+    beam = normalize_beam(beam_fwhm_rad, freqs.size)
+    normalized_seed = normalize_seed(seed)
+    sigma = _normalize_sigma_uK_arcmin(sigma_uK_arcmin, freqs.size)
+
+    pixel_area_arcmin2 = hp.nside2pixarea(nside, degrees=True) * 3600.0
+    sigma_pixel = sigma / np.sqrt(pixel_area_arcmin2)
+
+    npix = hp.nside2npix(nside)
+    rng = np.random.default_rng(normalized_seed)
+    standard = rng.standard_normal(
+        size=(freqs.size, len(normalized_fields), npix)
+    ).astype(np.float64, copy=False)
+    maps = standard * sigma_pixel.reshape(-1, 1, 1)
+
+    if normalized_ordering == "NESTED":
+        maps = _reorder_ring_to_nested(maps)
+
+    return MultiFreqCompMap(
+        maps=maps,
+        unit="uK_CMB",
+        nside=nside,
+        ordering=normalized_ordering,
+        coord=coord,
+        freqs_ghz=freqs,
+        fields=normalized_fields,
+        beam_fwhm_rad=beam,
+        component_name=component_name,
+        auxiliary_maps={},
+        metadata={**metadata, "seed": normalized_seed},
+    )
+
+
 def sample_component_alm(
     *,
     ps: AngularPowerSpectrum,
